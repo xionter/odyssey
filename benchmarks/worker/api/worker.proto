@@ -1,0 +1,67 @@
+syntax = "proto3";
+
+package odyssey.worker;
+
+option go_package = "github.com/yandex/odyssey/benchmarks/worker/api;workerapi";
+
+service LoadGenerator {
+  // подготовить запуск
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  // запустить подготовленный запуск
+  rpc Start(StartRequest) returns (StartResponse);
+  // остановить активный запуск
+  rpc Stop(StopRequest) returns (StopResponse);
+  // получить состояние запуска
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+// параметры подготовки
+message PrepareRequest {
+  string run_id = 1;
+  string scenario_id = 2;
+  string target = 3;
+  uint32 operations = 4;
+}
+
+// результат подготовки
+message PrepareResponse {
+  string run_id = 1;
+  string state = 2;
+}
+
+// параметры запуска
+message StartRequest {
+  string run_id = 1;
+}
+
+// результат запуска
+message StartResponse {
+  string run_id = 1;
+  string state = 2;
+  int64 started_unix_nano = 3;
+}
+
+// параметры остановки
+message StopRequest {
+  string run_id = 1;
+}
+
+// результат остановки
+message StopResponse {
+  string run_id = 1;
+  string state = 2;
+  int64 elapsed_nanos = 3;
+}
+
+// запрос состояния
+message StatusRequest {
+  string run_id = 1;
+}
+
+// текущее состояние запуска
+message StatusResponse {
+  string run_id = 1;
+  string state = 2;
+  int64 elapsed_nanos = 3;
+  string error = 4;
+}
