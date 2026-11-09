@@ -27,24 +27,6 @@ typedef enum {
 } od_server_state_t;
 
 struct od_server {
-	/*
-	 * reference counter for backend connection
-	 *
-	 * we consider the following as reference:
-	 * - functions od_server_create and od_server_free
-	 *   (smth like "the pool holds the ref")
-	 * - client connection that use the server
-	 *   (od_server_attach_client and od_server_dettach_client)
-	 * - each currently running cancel on the server
-	 *   (od_server_cancel_begin and od_server_cancel_end)
-	 * 
-	 * every server that have ref counter > 1
-	 * should have ACTIVE state,
-	 * to prevent sending cancel to wrong client
-	 * 
-	 * not for directly usage
-	 */
-	atomic_int_fast64_t refs;
 	od_server_state_t state;
 
 	od_scram_state_t scram_state;
@@ -56,7 +38,6 @@ struct od_server {
 	/* Copy stmt state */
 	int copy_mode;
 	/**/
-	int deploy_sync;
 	od_stat_state_t stats_state;
 
 	od_multi_pool_element_t *pool_element;
@@ -66,9 +47,12 @@ struct od_server {
 	uint64_t sync_reply;
 	int msg_broken;
 
+	/* how long the server stays idle, in seconds;
+	 * advanced by the cron loop once per second */
 	int idle_time;
 
 	kiwi_key_t key;
+	uint32_t proto_version;
 	kiwi_key_t key_client;
 	kiwi_vars_t vars;
 
@@ -76,6 +60,8 @@ struct od_server {
 	/* do not set this field directly, use od_server_attach_client */
 	od_client_t *client;
 	od_route_t *route;
+	/* A counted connection may leave its pool before its socket is closed. */
+	bool stats_connected;
 
 	od_global_t *global;
 	int offline;
@@ -89,11 +75,10 @@ struct od_server {
 	int xproto_err;
 	int cached_plan_broken;
 	int oom;
-	mm_hashmap_t *prep_stmts;
-	/* SIEVE eviction queue over the reserved statements */
-	od_list_t pstmt_fifo;
-	od_list_t *pstmt_hand;
-	size_t pstmt_count;
+	od_server_pstmt_map_t *prep_stmts;
+
+	/* number of ErrorResponse messages received */
+	uint64_t error_responses;
 
 	int need_startup;
 };
@@ -102,7 +87,6 @@ static inline void od_server_init(od_server_t *server, int reserve_prep_stmts)
 {
 	memset(server, 0, sizeof(od_server_t));
 	server->state = OD_SERVER_UNDEF;
-	atomic_init(&server->refs, 1);
 	server->route = NULL;
 	server->client = NULL;
 	server->global = NULL;
@@ -111,7 +95,6 @@ static inline void od_server_init(od_server_t *server, int reserve_prep_stmts)
 	server->is_transaction = 0;
 	server->is_error_tx = 0;
 	server->copy_mode = 0;
-	server->deploy_sync = 0;
 	server->sync_request = 0;
 	server->sync_reply = 0;
 	server->init_time_us = machine_time_us();
@@ -133,16 +116,13 @@ static inline void od_server_init(od_server_t *server, int reserve_prep_stmts)
 
 	od_io_init(&server->io);
 	od_list_init(&server->link);
-	od_list_init(&server->pstmt_fifo);
-	server->pstmt_hand = &server->pstmt_fifo;
-	server->pstmt_count = 0;
 	memset(&server->id, 0, sizeof(server->id));
 
 	server->xproto_mode = 0;
 	server->xproto_err = 0;
 	server->cached_plan_broken = 0;
 	if (reserve_prep_stmts) {
-		server->prep_stmts = od_server_pstmt_hashmap_create();
+		server->prep_stmts = od_server_pstmt_map_create();
 	} else {
 		server->prep_stmts = NULL;
 	}
@@ -162,6 +142,7 @@ static inline od_server_t *od_server_allocate(int reserve_prep_stmts)
 }
 
 void od_server_free(od_server_t *server);
+void od_server_stat_close(od_server_t *server);
 
 static inline void od_server_sync_request(od_server_t *server, uint64_t count)
 {
@@ -173,11 +154,6 @@ static inline void od_server_sync_reply(od_server_t *server)
 	server->sync_reply++;
 }
 
-static inline int od_server_in_deploy(od_server_t *server)
-{
-	return server->deploy_sync > 0;
-}
-
 static inline int od_server_synchronized(od_server_t *server)
 {
 	od_assert(server->sync_request >= server->sync_reply);
@@ -187,5 +163,3 @@ static inline int od_server_synchronized(od_server_t *server)
 od_server_pool_t *od_server_pool(od_server_t *server);
 const od_address_t *od_server_pool_address(od_server_t *server);
 void od_server_set_pool_state(od_server_t *server, od_server_state_t state);
-void od_server_cancel_begin(od_server_t *server);
-void od_server_cancel_end(od_server_t *server);

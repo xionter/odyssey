@@ -19,7 +19,10 @@ ODYSSEY_TEST_DEBIAN_DISTRO ?= bookworm
 ODYSSEY_TEST_TARGET_PLATFORM ?= linux/$(shell uname -m)
 ODYSSEY_ORACLELINUX_VERSION ?= 8
 ODYSSEY_CC ?= gcc
+ODYSSEY_CMAKE_EXTRA ?=
 PROTO_TEST_TAG ?= all
+
+CMAKE_FLAGS += $(ODYSSEY_CMAKE_EXTRA)
 
 CONCURRENCY:=1
 CURRENT_USER_UID_GID:=$(shell id -u):$(shell id -g)
@@ -107,7 +110,7 @@ build_reldbgtcmalloc:
 
 build_dbg:
 	mkdir -p $(BUILD_TEST_DIR)
-	cd $(BUILD_TEST_DIR) && $(CMAKE_BIN) .. -DCMAKE_BUILD_TYPE=Debug && make -j$(CONCURRENCY)
+	cd $(BUILD_TEST_DIR) && $(CMAKE_BIN) .. -DCMAKE_BUILD_TYPE=Debug $(CMAKE_FLAGS) && make -j$(CONCURRENCY)
 
 gdb:
 	gdb --args ./build/sources/odyssey $(DEV_CONF) --console --log_to_stdout # --verbose
@@ -261,8 +264,9 @@ ci-unittests:
 		-f ./test/unit/Dockerfile \
 		--build-arg build_type=$(ODYSSEY_BUILD_TYPE) \
 		--build-arg odyssey_cc=$(ODYSSEY_CC) \
+		--build-arg odyssey_cmake_extra="$(ODYSSEY_CMAKE_EXTRA)" \
 		--tag=odyssey/unit-test-runner .
-	docker run odyssey/unit-test-runner
+	docker run --init odyssey/unit-test-runner
 
 ci-build-check-ubuntu:
 	docker build \

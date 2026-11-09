@@ -156,6 +156,9 @@ struct od_rule {
 	char *password;
 	int password_len;
 
+	/* path to .pgpass file containing passwords */
+	char *password_pgpass;
+
 	od_rule_storage_t *storage;
 	char *storage_name;
 	char *storage_db;
@@ -175,6 +178,8 @@ struct od_rule {
 
 	/* Should we deploy user GUCS when attaching? */
 	int maintain_params;
+	/* set when maintain_params was set on the rule level */
+	int maintain_params_set;
 
 	/* group */
 	od_group_t *group; /* set if rule is group */
@@ -192,7 +197,11 @@ struct od_rule {
 	int client_max_set;
 	int client_max;
 	int log_debug;
+	int log_debug_sampling;
+	int log_debug_sampling_set;
 	int log_query;
+	int log_query_sampling;
+	int log_query_sampling_set;
 	int enable_password_passthrough;
 	double *quantiles;
 	int quantiles_count;
@@ -200,6 +209,8 @@ struct od_rule {
 	int auto_route_ro_on_standby;
 	int server_drop_on_oom;
 	uint64_t server_lifetime_us;
+	/* TCP keepalive settings: keepalive and interval in seconds,
+	 * usr timeout (TCP_USER_TIMEOUT) in milliseconds */
 	int keepalive;
 	int keepalive_keep_interval;
 	int keepalive_probes;

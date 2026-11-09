@@ -11,9 +11,12 @@
 static _Alignas(max_align_t) uint8_t s_arena_buf[ARENA_SIZE];
 static od_linear_alloc_t s_arena;
 
-static void on_error(const char *msg, void *userdata)
+static int s_err_position;
+
+static void on_error(const char *msg, int position, void *userdata)
 {
 	strcpy((char *)userdata, msg);
+	s_err_position = position;
 }
 
 static const char *parse_ok(const char *input)
@@ -45,6 +48,7 @@ static void parse_fail(const char *input)
 	static char err[PRINT_BUF_SIZE];
 
 	memset(err, 0, sizeof(err));
+	s_err_position = 0;
 	od_linear_alloc_reset(&s_arena, 0);
 	od_console_node_t *node =
 		od_console_parse(input, strlen(input), &s_arena, on_error, err);
@@ -55,6 +59,21 @@ static void parse_fail(const char *input)
 		abort();
 	}
 	test(node == NULL);
+}
+
+/*
+ * parse must fail with the error cursor at the given 1-based position
+ */
+static void parse_fail_at(const char *input, int position)
+{
+	parse_fail(input);
+	if (s_err_position != position) {
+		fprintf(stderr,
+			"parse_fail_at: input=[%s] expected position %d, got %d\n",
+			input, position, s_err_position);
+		abort();
+	}
+	test(s_err_position == position);
 }
 
 /*
@@ -146,11 +165,6 @@ static void test_show_storages(void)
 	test(strcmp(parse_ok("SHOW STORAGES"), "(show storages)") == 0);
 }
 
-static void test_show_fds(void)
-{
-	test(strcmp(parse_ok("SHOW FDS"), "(show fds)") == 0);
-}
-
 static void test_show_is_paused(void)
 {
 	test(strcmp(parse_ok("SHOW IS_PAUSED"), "(show is_paused)") == 0);
@@ -187,6 +201,45 @@ static void test_show_whitespace(void)
 static void test_show_with_block_comment(void)
 {
 	test(strcmp(parse_ok("SHOW /* comment */ STATS"), "(show stats)") == 0);
+}
+
+/*
+ * SELECT * FROM <target> is a plain alias for SHOW <target>
+ */
+static void test_select_from_alias(void)
+{
+	test(strcmp(parse_ok("SELECT * FROM STATS"), "(show stats)") == 0);
+	test(strcmp(parse_ok("select * from pools"), "(show pools)") == 0);
+	test(strcmp(parse_ok("SELECT * FROM SERVERS;"), "(show servers)") == 0);
+	test(strcmp(parse_ok("SELECT*FROM clients"), "(show clients)") == 0);
+	test(strcmp(parse_ok("SELECT * FROM CONFIG"), "(show config)") == 0);
+}
+
+static void test_select_from_errors(void)
+{
+	parse_fail("SELECT");
+	parse_fail("SELECT *");
+	parse_fail("SELECT * FROM");
+	parse_fail("SELECT FROM stats");
+	parse_fail("SELECT stats");
+	parse_fail("SELECT * stats");
+	parse_fail("SELECT * FROM 42");
+	parse_fail("SELECT 1 FROM stats");
+	parse_fail("SELECT * FROM stats extra more");
+
+	/* SHOW <target> <arg> has no SELECT alias */
+	test(strcmp(parse_ok("SHOW CONFIG workers"), "(show config workers)") ==
+	     0);
+	parse_fail("SELECT * FROM CONFIG workers");
+	parse_fail("select * from config workers");
+	parse_fail("SELECT * FROM CONFIG log_debug;");
+}
+
+static void test_load(void)
+{
+	test(strcmp(parse_ok("LOAD pdbg_point"), "(load pdbg_point)") == 0);
+	parse_fail("LOAD");
+	parse_fail("LOAD 42");
 }
 
 /*
@@ -286,6 +339,78 @@ static void test_drop_servers(void)
 	test(strcmp(parse_ok("DROP SERVERS;"), "(drop servers)") == 0);
 }
 
+static void test_alter_system_set(void)
+{
+	test(strcmp(parse_ok("ALTER SYSTEM SET workers = 4"),
+		    "(alter system set workers=4)") == 0);
+	test(strcmp(parse_ok("ALTER SYSTEM SET workers TO 4"),
+		    "(alter system set workers=4)") == 0);
+	test(strcmp(parse_ok("ALTER SYSTEM SET availability_zone = 'b'"),
+		    "(alter system set availability_zone=b)") == 0);
+	test(strcmp(parse_ok("ALTER SYSTEM SET log_debug = yes"),
+		    "(alter system set log_debug=yes)") == 0);
+}
+
+static void test_alter_system_set_default(void)
+{
+	test(strcmp(parse_ok("ALTER SYSTEM SET workers = DEFAULT"),
+		    "(alter system reset workers)") == 0);
+	test(strcmp(parse_ok("ALTER SYSTEM SET workers TO DEFAULT"),
+		    "(alter system reset workers)") == 0);
+}
+
+static void test_alter_system_reset(void)
+{
+	test(strcmp(parse_ok("ALTER SYSTEM RESET workers"),
+		    "(alter system reset workers)") == 0);
+	test(strcmp(parse_ok("ALTER SYSTEM RESET ALL"),
+		    "(alter system reset all)") == 0);
+}
+
+static void test_alter_system_case_and_semicolon(void)
+{
+	test(strcmp(parse_ok("alter system set workers = 4;"),
+		    "(alter system set workers=4)") == 0);
+	test(strcmp(parse_ok("Alter System Reset All;"),
+		    "(alter system reset all)") == 0);
+}
+
+static void test_alter_system_keywords_as_names(void)
+{
+	test(strcmp(parse_ok("SHOW system"), "(show system)") == 0);
+	test(strcmp(parse_ok("SET reset = 1"), "(set reset=1)") == 0);
+	test(strcmp(parse_ok("ALTER SYSTEM SET system = alter"),
+		    "(alter system set system=alter)") == 0);
+	test(strcmp(parse_ok("ALTER SYSTEM RESET reset"),
+		    "(alter system reset reset)") == 0);
+}
+
+static void test_all_as_value(void)
+{
+	/* ALL is reserved as a name, but still accepted as a value */
+	test(strcmp(parse_ok("SET key = all"), "(set key=all)") == 0);
+	test(strcmp(parse_ok("SET key TO ALL"), "(set key=all)") == 0);
+	test(strcmp(parse_ok("ALTER SYSTEM SET availability_zone = all"),
+		    "(alter system set availability_zone=all)") == 0);
+	test(strcmp(parse_ok("ALTER SYSTEM RESET ALL"),
+		    "(alter system reset all)") == 0);
+	parse_fail("ALTER SYSTEM SET all = 1");
+}
+
+static void test_alter_system_errors(void)
+{
+	parse_fail("ALTER");
+	parse_fail("ALTER SYSTEM");
+	parse_fail("ALTER SYSTEM SET");
+	parse_fail("ALTER SYSTEM SET workers");
+	parse_fail("ALTER SYSTEM SET workers =");
+	parse_fail("ALTER SYSTEM SET a.b = 1");
+	parse_fail("ALTER SYSTEM RESET");
+	parse_fail("ALTER SYSTEM RESET a.b");
+	parse_fail("ALTER SYSTEM RESET ALL extra");
+	parse_fail("ALTER workers");
+}
+
 static void test_empty_input(void)
 {
 	od_linear_alloc_reset(&s_arena, 0);
@@ -312,6 +437,24 @@ static void test_parse_errors(void)
 	parse_fail("DISCARD ALL");
 }
 
+/*
+ * error cursor points to the offending token (1-based),
+ * or right past the end of input when it ends too early
+ */
+static void test_parse_error_position(void)
+{
+	parse_fail_at("SELECT 1", 8);
+	parse_fail_at("RELOAD extra", 8);
+	parse_fail_at("  GC extra;", 6);
+	parse_fail_at("SHOW STATS extra more", 18);
+	parse_fail_at("SHOW CONFIG workers extra", 21);
+	parse_fail_at("SET odyssey.foo TO", 19);
+	parse_fail_at("SHOW", 5);
+	parse_fail_at("KILL_CLIENT c3f1", 13);
+	parse_fail_at("SHOW -- comment\n STATS extra more", 30);
+	parse_fail_at("SHOW ST@TS", 8);
+}
+
 void odyssey_test_console_parser(void)
 {
 	od_linear_alloc_init(&s_arena, s_arena_buf, sizeof(s_arena_buf));
@@ -332,7 +475,6 @@ void odyssey_test_console_parser(void)
 	test_show_version();
 	test_show_listen();
 	test_show_storages();
-	test_show_fds();
 	test_show_is_paused();
 	test_show_host_utilization();
 	test_show_rules();
@@ -340,6 +482,10 @@ void odyssey_test_console_parser(void)
 	test_show_case_insensitive();
 	test_show_whitespace();
 	test_show_with_block_comment();
+	test_select_from_alias();
+	test_select_from_errors();
+
+	test_load();
 
 	test_kill_client_basic();
 	test_kill_client_case_insensitive_cmd();
@@ -360,6 +506,15 @@ void odyssey_test_console_parser(void)
 
 	test_drop_servers();
 
+	test_alter_system_set();
+	test_alter_system_set_default();
+	test_alter_system_reset();
+	test_alter_system_case_and_semicolon();
+	test_alter_system_keywords_as_names();
+	test_all_as_value();
+	test_alter_system_errors();
+
 	test_empty_input();
 	test_parse_errors();
+	test_parse_error_position();
 }

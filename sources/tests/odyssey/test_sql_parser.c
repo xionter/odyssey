@@ -34,6 +34,15 @@ static od_config_query_parsing_t s_full_parsing = {
 	.max_query_len = DEFAULT_MAX_QUERY_LEN,
 };
 
+static char *s_standby_extra_names[] = { "my_ro_fn", "other_safe_fn" };
+
+static od_config_query_parsing_t s_full_parsing_extra = {
+	.mode = OD_CONFIG_QUERY_PARSING_MODE_FULL,
+	.max_query_len = DEFAULT_MAX_QUERY_LEN,
+	.standby_function_names = s_standby_extra_names,
+	.standby_function_names_count = 2,
+};
+
 #define FULL_ARENA_SIZE (5 * 1024 * 1024)
 
 static _Alignas(max_align_t) uint8_t s_full_arena_buf[FULL_ARENA_SIZE];
@@ -124,6 +133,12 @@ static void test_show_whitespace(void)
 static void test_show_with_block_comment(void)
 {
 	test(strcmp(parse_ok("SHOW /* comment */ search_path"),
+		    "(show search_path)") == 0);
+
+	test(strcmp(parse_ok("SHOW search_path /* comment */"),
+		    "(show search_path)") == 0);
+
+	test(strcmp(parse_ok("SHOW search_path -- comment"),
 		    "(show search_path)") == 0);
 }
 
@@ -357,6 +372,11 @@ static void test_unlisten_name(void)
 	test(strcmp(parse_ok("UNLISTEN foo"), "(unlisten foo)") == 0);
 }
 
+static void test_unclosed_comments(void)
+{
+	parse_fail("/* SHOW x");
+}
+
 static void test_unlisten_star(void)
 {
 	test(strcmp(parse_ok("UNLISTEN *"), "(unlisten *)") == 0);
@@ -380,6 +400,24 @@ static void test_empty_input(void)
 	od_linear_alloc_reset(&s_arena, 0);
 	od_sql_minimal_node_t *node =
 		od_sql_minimal_parse("", 0, &s_arena, NULL, NULL);
+	test(node != NULL);
+	test(node->type == OD_SQL_MINIMAL_NODE_TYPE_EMPTY_STMT);
+
+	od_linear_alloc_reset(&s_arena, 0);
+	node = od_sql_minimal_parse(";", 1, &s_arena, NULL, NULL);
+	test(node != NULL);
+	test(node->type == OD_SQL_MINIMAL_NODE_TYPE_EMPTY_STMT);
+
+	od_linear_alloc_reset(&s_arena, 0);
+	node = od_sql_minimal_parse(" ; ; ", strlen(" ; ; "), &s_arena, NULL,
+				    NULL);
+	test(node != NULL);
+	test(node->type == OD_SQL_MINIMAL_NODE_TYPE_EMPTY_STMT);
+
+	/* an empty query followed by a statement is not an empty query */
+	od_linear_alloc_reset(&s_arena, 0);
+	node = od_sql_minimal_parse("; SELECT 1;", strlen("; SELECT 1;"),
+				    &s_arena, NULL, NULL);
 	test(node == NULL);
 }
 
@@ -389,8 +427,10 @@ static void test_parse_errors(void)
 	parse_fail("SHOW");
 	parse_fail("SET foo =");
 	parse_fail("DEALLOCATE");
-	parse_fail("DEALLOCATE PREPARE");
-	parse_fail("DEALLOCATE PREPARE;");
+	test(strcmp(parse_ok("DEALLOCATE PREPARE"), "(deallocate prepare)") ==
+	     0);
+	test(strcmp(parse_ok("DEALLOCATE PREPARE;"), "(deallocate prepare)") ==
+	     0);
 	parse_fail("DEALLOCATE PREPARE prepared pst");
 	parse_fail("DEALLOCATE PREPARED pst");
 	parse_fail("DEALLOCATE ALL pst");
@@ -541,6 +581,13 @@ static void test_parse_fill_ctx(void)
 	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SELECT));
 	od_query_ctx_reset(&ctx);
 
+	od_linear_alloc_reset(&s_arena, 0);
+	od_query_parse_fill_ctx(" ; ; ", strlen(" ; ; "), &s_arena, &ctx,
+				&s_minimal_parsing);
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_EMPTY));
+	od_query_ctx_reset(&ctx);
+
 	/* SHOW — name stored in ctx */
 	od_linear_alloc_reset(&s_arena, 0);
 	od_query_parse_fill_ctx("SHOW application_name",
@@ -622,6 +669,13 @@ static void fill_ctx_full(const char *query, od_query_ctx_t *ctx)
 	od_linear_alloc_reset(&s_full_arena, 0);
 	od_query_parse_fill_ctx(query, strlen(query), &s_full_arena, ctx,
 				&s_full_parsing);
+}
+
+static void fill_ctx_full_extra(const char *query, od_query_ctx_t *ctx)
+{
+	od_linear_alloc_reset(&s_full_arena, 0);
+	od_query_parse_fill_ctx(query, strlen(query), &s_full_arena, ctx,
+				&s_full_parsing_extra);
 }
 
 static void test_parse_fill_ctx_full(void)
@@ -711,10 +765,10 @@ static void test_parse_fill_ctx_full(void)
 		test(ctx.s2_long == NULL);
 	}
 
-	/* SET ... DEFAULT — not VAR_SET_VALUE, no IS_SET, no parse error */
+	/* DEFAULT uses the same empty value as the minimal parser. */
 	fill_ctx_full("SET application_name TO DEFAULT", &ctx);
 	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
-	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SET));
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SET));
 	od_query_ctx_reset(&ctx);
 
 	/* SET with multiple values — no IS_SET, no parse error */
@@ -835,6 +889,48 @@ static void test_parse_fill_ctx_full(void)
 
 	/* non pg_catalog qualification is never whitelisted */
 	fill_ctx_full("SELECT myschema.count(*)", &ctx);
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SELECT));
+	od_query_ctx_reset(&ctx);
+
+	/*
+	 * query_parsing.standby_function_list extends the built-in list
+	 */
+	fill_ctx_full_extra("SELECT my_ro_fn()", &ctx);
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SELECT));
+	od_query_ctx_reset(&ctx);
+
+	fill_ctx_full_extra("SELECT other_safe_fn('x')", &ctx);
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SELECT));
+	od_query_ctx_reset(&ctx);
+
+	fill_ctx_full_extra("SELECT pg_catalog.my_ro_fn()", &ctx);
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SELECT));
+	od_query_ctx_reset(&ctx);
+
+	/* built-in functions are still recognized together with the extra list */
+	fill_ctx_full_extra("SELECT count(*), my_ro_fn()", &ctx);
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SELECT));
+	od_query_ctx_reset(&ctx);
+
+	/* unknown functions are still not recognized */
+	fill_ctx_full_extra("SELECT unknown_fn()", &ctx);
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SELECT));
+	od_query_ctx_reset(&ctx);
+
+	/* the extra list does not bypass the qualification check */
+	fill_ctx_full_extra("SELECT myschema.my_ro_fn()", &ctx);
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SELECT));
+	od_query_ctx_reset(&ctx);
+
+	/* the default list alone does not know about the extra functions */
+	fill_ctx_full("SELECT my_ro_fn()", &ctx);
 	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
 	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_SELECT));
 	od_query_ctx_reset(&ctx);
@@ -1045,9 +1141,25 @@ static void test_parse_fill_ctx_full(void)
 	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
 	od_query_ctx_reset(&ctx);
 
-	/* empty query — parse error */
+	/* empty query — answered virtually, no parse error at all */
 	fill_ctx_full("", &ctx);
-	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_EMPTY));
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	od_query_ctx_reset(&ctx);
+
+	fill_ctx_full(";", &ctx);
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_EMPTY));
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	od_query_ctx_reset(&ctx);
+
+	fill_ctx_full(" ; ;  ", &ctx);
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_EMPTY));
+	test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_PARSE_ERROR));
+	od_query_ctx_reset(&ctx);
+
+	/* "; SELECT 1;" is not an empty query */
+	fill_ctx_full("; SELECT 1;", &ctx);
+	test(od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_EMPTY) == 0);
 	od_query_ctx_reset(&ctx);
 }
 
@@ -1133,9 +1245,182 @@ static void test_parse_fill_ctx_modes(void)
 	}
 }
 
+static void test_prepare_locations(void)
+{
+	const char *sql =
+		" /* leading */ PREPARE \"Ab\" (numeric(10, 2), text[]) AS SELECT $1, ';', $$a;b$$ /* tail */;";
+	od_sql_minimal_prepare_stmt_t *node = (void *)od_sql_minimal_parse(
+		sql, strlen(sql), &s_arena, NULL, NULL);
+	test(node != NULL);
+	test(node->type == OD_SQL_MINIMAL_NODE_TYPE_PREPARE_STMT);
+	test(strcmp(node->name, "Ab") == 0);
+	test(node->name_location.start == strstr(sql, "\"A") - sql);
+	test(node->name_location.end == node->name_location.start + 4);
+	test(node->types_location.start == strstr(sql, "numeric") - sql);
+	test(node->types_location.end == strstr(sql, ") AS") - sql);
+	test(node->query_location.start == strstr(sql, "SELECT") - sql);
+	test(node->query_location.end == (int)strlen(sql) - 1);
+
+	sql = "PREPARE foo AS select 1";
+	node = (void *)od_sql_minimal_parse(sql, strlen(sql), &s_arena, NULL,
+					    NULL);
+	test(node != NULL);
+	test(node->types_location.start == -1);
+	test(node->query_location.start == 15);
+	test(node->query_location.end == (int)strlen(sql));
+
+	sql = " EXECUTE \"Ab\"(1, 'a;b');";
+	od_sql_minimal_execute_stmt_t *execute = (void *)od_sql_minimal_parse(
+		sql, strlen(sql), &s_arena, NULL, NULL);
+	test(execute != NULL);
+	test(execute->type == OD_SQL_MINIMAL_NODE_TYPE_EXECUTE_STMT);
+	test(strcmp(execute->name, "Ab") == 0);
+	test(execute->name_location.start == 9);
+	test(execute->name_location.end == 13);
+	test(execute->args_location.start == 13);
+	test(execute->args_location.end == (int)strlen(sql) - 1);
+
+	parse_fail("PREPARE foo$bar AS SELECT 1");
+	parse_fail("PREPARE \"A\"\"B\" AS SELECT 1");
+	parse_fail("PREPARE канал AS SELECT 1");
+	parse_fail("PREPARE U&\"name\" AS SELECT 1");
+}
+
+static void test_locations_after_comments(void)
+{
+	/*
+	 * block comments (including nested ones) are consumed via
+	 * input() and must not shift offsets of the following tokens
+	 */
+	const char *sql =
+		"/* pre * with stars ** /* nested */ */"
+		" PREPARE \"Ab\" /* c1 */(numeric(10, 2) /* c2 */, text[])"
+		" AS SELECT /* c3 */ $1, 'a;b'";
+	od_sql_minimal_prepare_stmt_t *node = (void *)od_sql_minimal_parse(
+		sql, strlen(sql), &s_arena, NULL, NULL);
+	test(node != NULL);
+	test(node->type == OD_SQL_MINIMAL_NODE_TYPE_PREPARE_STMT);
+	test(strcmp(node->name, "Ab") == 0);
+	test(node->name_location.start == strstr(sql, "\"A") - sql);
+	test(node->name_location.end == node->name_location.start + 4);
+	test(node->types_location.start == strstr(sql, "numeric") - sql);
+	test(node->types_location.end == strstr(sql, ") AS") - sql);
+	test(node->query_location.start == strstr(sql, "SELECT") - sql);
+	test(node->query_location.end == (int)strlen(sql));
+
+	/* comments inside the opaque EXECUTE() tail */
+	sql = "/* lead */ EXECUTE \"Ab\" (1 /* c */, 'a;b' /* c2 */);";
+	od_sql_minimal_execute_stmt_t *execute = (void *)od_sql_minimal_parse(
+		sql, strlen(sql), &s_arena, NULL, NULL);
+	test(execute != NULL);
+	test(strcmp(execute->name, "Ab") == 0);
+	test(execute->name_location.start == strstr(sql, "\"A") - sql);
+	test(execute->name_location.end == execute->name_location.start + 4);
+	test(execute->args_location.start == strstr(sql, "(1") - sql);
+	test(execute->args_location.end == (int)strlen(sql) - 1);
+}
+
+static void test_execute_query_ctx(void)
+{
+	const char *sql =
+		"/* before */ EXECUTE \"Mixed\" /* args */ (1 + 2, upper('я'));";
+	od_query_ctx_t ctx = { 0 };
+	const od_config_query_parsing_t *modes[] = { &s_minimal_parsing,
+						     &s_full_parsing };
+	for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+		od_linear_alloc_reset(&s_full_arena, 0);
+		od_query_parse_fill_ctx(sql, strlen(sql), &s_full_arena, &ctx,
+					modes[i]);
+		test(ctx.flags == OD_QUERY_CTX_IS_EXECUTE);
+		test(strcmp(ctx.s1, "Mixed") == 0);
+		test(ctx.name_location.start == 21);
+		test(ctx.name_location.end == 28);
+		od_query_ctx_reset(&ctx);
+
+		const char *batch = "EXECUTE p(1); SELECT 2";
+		od_linear_alloc_reset(&s_full_arena, 0);
+		od_query_parse_fill_ctx(batch, strlen(batch), &s_full_arena,
+					&ctx, modes[i]);
+		test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_IS_EXECUTE));
+		od_query_ctx_reset(&ctx);
+	}
+
+	const char *full_only =
+		"/* я */ EXECUTE U&\"A!0042\" UESCAPE '!' /* keep */ (1+2)";
+	fill_ctx_full(full_only, &ctx);
+	test(ctx.flags == OD_QUERY_CTX_IS_EXECUTE);
+	test(strcmp(ctx.s1, "AB") == 0);
+	test(ctx.name_location.start == 17);
+	test(ctx.name_location.end == 39);
+	od_query_ctx_reset(&ctx);
+}
+
+static void test_reserved_query_ctx(void)
+{
+	static const struct {
+		const char *query;
+		int minimal_reserved;
+		int full_reserved;
+	} cases[] = {
+		{ "PREPARE odyssey AS SELECT 1", 1, 1 },
+		{ "PREPARE ODYSSEY_custom AS SELECT 1", 1, 1 },
+		{ "EXECUTE odyssey_pstmt_0", 1, 1 },
+		{ "DEALLOCATE PREPARE \"odyssey_custom\"", 1, 1 },
+		{ "EXECUTE U&\"\\006fdyssey_pstmt_0\"", 0, 1 },
+		{ "EXECUTE U&\"!006fdyssey_pstmt_0\" UESCAPE '!'", 0, 1 },
+		{ "DEALLOCATE ALL", 0, 0 },
+		{ "PREPARE ordinary AS SELECT 'odyssey'", 0, 0 },
+		{ "PREPARE \"ODYSSEY\" AS SELECT 1", 0, 0 },
+		{ "SELECT 'EXECUTE odyssey_pstmt_0'", 0, 0 },
+		{ "-- EXECUTE odyssey_pstmt_0\nSELECT 1", 0, 0 },
+		{ "EXPLAIN EXECUTE odyssey_pstmt_0", 0, 1 },
+		{ "CREATE TABLE t AS EXECUTE odyssey_pstmt_0", 0, 1 },
+		{ "EXPLAIN ANALYZE CREATE TABLE t AS EXECUTE odyssey_pstmt_0",
+		  0, 1 },
+		{ "SELECT nextval('s'); EXECUTE odyssey_pstmt_0", 0, 0 },
+		{ "EXECUTE odyssey_pstmt_0; SELECT 1", 0, 0 },
+		{ "EXECUTE odyssey_pstmt_0; SELECT FROM", 0, 0 },
+		{ "PREPARE odyssey AS SELECT FROM", 1, 0 },
+	};
+	od_query_ctx_t ctx = { 0 };
+	const od_config_query_parsing_t *modes[] = { &s_minimal_parsing,
+						     &s_full_parsing };
+	for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		for (size_t mode = 0; mode < 2; mode++) {
+			od_linear_alloc_reset(&s_full_arena, 0);
+			od_query_parse_fill_ctx(cases[i].query,
+						strlen(cases[i].query),
+						&s_full_arena, &ctx,
+						modes[mode]);
+			int expected = mode == 0 ? cases[i].minimal_reserved :
+						   cases[i].full_reserved;
+			test(od_query_ctx_has(&ctx,
+					      OD_QUERY_CTX_HAS_RESERVED_NAME) ==
+			     expected);
+			od_query_ctx_reset(&ctx);
+		}
+	}
+	/* Length and disabled policies cannot leave a previous reserved flag. */
+	const char *query = "EXECUTE odyssey_pstmt_0";
+	for (size_t i = 0; i < 2; i++) {
+		const od_config_query_parsing_t *policy =
+			i == 0 ? &s_disabled_parsing : &s_small_parsing;
+		od_linear_alloc_reset(&s_full_arena, 0);
+		od_query_parse_fill_ctx(query, strlen(query), &s_full_arena,
+					&ctx, &s_full_parsing);
+		test(od_query_ctx_has(&ctx, OD_QUERY_CTX_HAS_RESERVED_NAME));
+		od_query_parse_fill_ctx(query, strlen(query), &s_full_arena,
+					&ctx, policy);
+		test(!od_query_ctx_has(&ctx, OD_QUERY_CTX_HAS_RESERVED_NAME));
+	}
+	od_query_ctx_reset(&ctx);
+}
+
 void odyssey_test_sql_minimal_parser(void)
 {
 	od_linear_alloc_init(&s_arena, s_arena_buf, sizeof(s_arena_buf));
+	test_prepare_locations();
+	test_locations_after_comments();
 
 	test_parse_fill_ctx_modes();
 
@@ -1196,4 +1481,8 @@ void odyssey_test_sql_minimal_parser(void)
 	test_extract_query_ctx();
 	test_parse_fill_ctx();
 	test_parse_fill_ctx_full();
+
+	test_unclosed_comments();
+	test_execute_query_ctx();
+	test_reserved_query_ctx();
 }

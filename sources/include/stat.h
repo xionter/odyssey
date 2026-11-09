@@ -38,9 +38,16 @@ struct od_stat {
 	atomic_uint_fast64_t count_parse;
 	atomic_uint_fast64_t count_parse_reuse;
 	atomic_uint_fast64_t count_cancel;
+	atomic_uint_fast64_t client_connections;
+	atomic_uint_fast64_t client_disconnections;
+	atomic_uint_fast64_t server_connections;
+	atomic_uint_fast64_t server_disconnections;
+	/* Protected by the route lock. */
+	uint64_t server_detaches;
 
 	td_histogram_t *transaction_hgram[QUANTILES_WINDOW];
 	td_histogram_t *query_hgram[QUANTILES_WINDOW];
+	td_histogram_t *client_lifetime_hgram[QUANTILES_WINDOW];
 };
 
 static inline void od_stat_state_init(od_stat_state_t *state)
@@ -58,6 +65,7 @@ static inline void od_stat_free(od_stat_t *stat)
 	for (size_t i = 0; i < QUANTILES_WINDOW; ++i) {
 		td_free(stat->transaction_hgram[i]);
 		td_free(stat->query_hgram[i]);
+		td_free(stat->client_lifetime_hgram[i]);
 	}
 }
 
@@ -79,20 +87,38 @@ static inline void od_stat_wait_time(od_stat_t *stat, uint64_t wait_time_us)
 	atomic_fetch_add_explicit(&stat->count_wait, 1, memory_order_relaxed);
 }
 
-static inline void od_stat_parse(od_stat_t *stat)
-{
-	atomic_fetch_add_explicit(&stat->count_parse, 1, memory_order_relaxed);
-}
-
-static inline void od_stat_parse_reuse(od_stat_t *stat)
-{
-	atomic_fetch_add_explicit(&stat->count_parse_reuse, 1,
-				  memory_order_relaxed);
-}
-
 static inline void od_stat_cancel(od_stat_t *stat)
 {
 	atomic_fetch_add_explicit(&stat->count_cancel, 1, memory_order_relaxed);
+}
+
+static inline void od_stat_client_connect(od_stat_t *stat)
+{
+	atomic_fetch_add_explicit(&stat->client_connections, 1,
+				  memory_order_relaxed);
+}
+
+static inline void od_stat_client_disconnect(od_stat_t *stat)
+{
+	atomic_fetch_add_explicit(&stat->client_disconnections, 1,
+				  memory_order_relaxed);
+}
+
+static inline void od_stat_server_connect(od_stat_t *stat)
+{
+	atomic_fetch_add_explicit(&stat->server_connections, 1,
+				  memory_order_relaxed);
+}
+
+static inline void od_stat_server_disconnect(od_stat_t *stat)
+{
+	atomic_fetch_add_explicit(&stat->server_disconnections, 1,
+				  memory_order_relaxed);
+}
+
+static inline void od_stat_server_detach(od_stat_t *stat)
+{
+	stat->server_detaches++;
 }
 
 static inline void od_stat_query_end(od_stat_t *stat, od_stat_state_t *state,
@@ -136,6 +162,15 @@ static inline void od_stat_query_end(od_stat_t *stat, od_stat_state_t *state,
 	}
 }
 
+static inline void od_stat_client_lifetime(od_stat_t *stat,
+					   uint64_t lifetime_us)
+{
+	if (stat->enable_quantiles) {
+		td_add(stat->client_lifetime_hgram[stat->current_tdigest],
+		       lifetime_us, 1);
+	}
+}
+
 static inline void od_stat_recv_server(od_stat_t *stat, uint64_t bytes)
 {
 	atomic_fetch_add_explicit(&stat->recv_server, bytes,
@@ -172,6 +207,15 @@ static inline void od_stat_copy(od_stat_t *dst, od_stat_t *src)
 						      memory_order_relaxed);
 	dst->count_cancel =
 		atomic_load_explicit(&src->count_cancel, memory_order_relaxed);
+	dst->client_connections = atomic_load_explicit(&src->client_connections,
+						       memory_order_relaxed);
+	dst->client_disconnections = atomic_load_explicit(
+		&src->client_disconnections, memory_order_relaxed);
+	dst->server_connections = atomic_load_explicit(&src->server_connections,
+						       memory_order_relaxed);
+	dst->server_disconnections = atomic_load_explicit(
+		&src->server_disconnections, memory_order_relaxed);
+	dst->server_detaches = src->server_detaches;
 }
 
 static inline void od_stat_sum(od_stat_t *sum, od_stat_t *stat)
@@ -198,6 +242,15 @@ static inline void od_stat_sum(od_stat_t *sum, od_stat_t *stat)
 						       memory_order_relaxed);
 	sum->count_cancel +=
 		atomic_load_explicit(&stat->count_cancel, memory_order_relaxed);
+	sum->client_connections += atomic_load_explicit(
+		&stat->client_connections, memory_order_relaxed);
+	sum->client_disconnections += atomic_load_explicit(
+		&stat->client_disconnections, memory_order_relaxed);
+	sum->server_connections += atomic_load_explicit(
+		&stat->server_connections, memory_order_relaxed);
+	sum->server_disconnections += atomic_load_explicit(
+		&stat->server_disconnections, memory_order_relaxed);
+	sum->server_detaches += stat->server_detaches;
 }
 
 static inline void od_stat_update_of(atomic_uint_fast64_t *prev,
@@ -221,6 +274,13 @@ static inline void od_stat_update(od_stat_t *dst, od_stat_t *stat)
 	od_stat_update_of(&dst->count_parse, &stat->count_parse);
 	od_stat_update_of(&dst->count_parse_reuse, &stat->count_parse_reuse);
 	od_stat_update_of(&dst->count_cancel, &stat->count_cancel);
+	od_stat_update_of(&dst->client_connections, &stat->client_connections);
+	od_stat_update_of(&dst->client_disconnections,
+			  &stat->client_disconnections);
+	od_stat_update_of(&dst->server_connections, &stat->server_connections);
+	od_stat_update_of(&dst->server_disconnections,
+			  &stat->server_disconnections);
+	dst->server_detaches = stat->server_detaches;
 }
 
 static inline void od_stat_average(od_stat_t *avg, od_stat_t *current,

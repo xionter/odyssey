@@ -111,6 +111,14 @@ static inline od_route_t *od_route_pool_new(od_route_pool_t *pool,
 				td_new(QUANTILES_COMPRESSION);
 			route->stats.query_hgram[i] =
 				td_new(QUANTILES_COMPRESSION);
+			route->stats.client_lifetime_hgram[i] =
+				td_new(QUANTILES_COMPRESSION);
+			if (route->stats.transaction_hgram[i] == NULL ||
+			    route->stats.query_hgram[i] == NULL ||
+			    route->stats.client_lifetime_hgram[i] == NULL) {
+				od_route_free(route);
+				return NULL;
+			}
 		}
 	}
 	od_list_append(&pool->list, &route->link);
@@ -169,6 +177,7 @@ static inline void od_route_pool_stat(od_route_pool_t *pool,
 
 		od_stat_t current;
 		od_stat_init(&current);
+		od_route_lock(route);
 		od_stat_copy(&current, &route->stats);
 
 		/* calculate average */
@@ -179,6 +188,8 @@ static inline void od_route_pool_stat(od_route_pool_t *pool,
 			next_tdigest = (current_tdigest + 1) % QUANTILES_WINDOW;
 			td_reset(route->stats.transaction_hgram[next_tdigest]);
 			td_reset(route->stats.query_hgram[next_tdigest]);
+			td_reset(route->stats
+					 .client_lifetime_hgram[next_tdigest]);
 			route->stats.current_tdigest = next_tdigest;
 		}
 
@@ -187,6 +198,7 @@ static inline void od_route_pool_stat(od_route_pool_t *pool,
 
 		/* update route stats */
 		od_stat_update(&route->stats_prev, &current);
+		od_route_unlock(route);
 
 		if (callback) {
 			callback(route, &current, &avg,
@@ -218,8 +230,10 @@ static inline void od_route_pool_stat_database_mark(od_route_pool_t *pool,
 			continue;
 		}
 
+		od_route_lock(route);
 		od_stat_sum(current, &route->stats);
 		od_stat_sum(prev, &route->stats_prev);
+		od_route_unlock(route);
 
 		route->stats_mark_db = true;
 	}

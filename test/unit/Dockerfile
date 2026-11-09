@@ -19,19 +19,26 @@ RUN apt-get update -o Acquire::AllowInsecureRepositories=true && apt-get install
     cmake \
     clang \
     bison flex \
+    postgresql-client \
+    procps \
+    python3 \
     libpthread-stubs0-dev libclang-rt-dev
 
 RUN mkdir /odyssey
 WORKDIR /odyssey
 
 COPY . ./
+COPY ./test/bin/ody-start ./test/bin/ody-stop /usr/bin/
 
 ARG odyssey_cc
 ENV CC=${odyssey_cc}
+
+ARG odyssey_cmake_extra=""
+ENV ODYSSEY_CMAKE_EXTRA=${odyssey_cmake_extra}
 
 RUN make clean
 RUN make ${build_type}
 
 WORKDIR /odyssey/build/sources
 
-ENTRYPOINT [ "/odyssey/build/sources/odyssey_test" ]
+ENTRYPOINT [ "/odyssey/test/unit/entrypoint.sh" ]

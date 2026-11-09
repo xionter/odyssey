@@ -9,8 +9,9 @@
 #include <types.h>
 #include <global.h>
 #include <instance.h>
+#include <wait_event.h>
 
-od_global_t *current_global od_read_mostly = NULL;
+od_global_t *current_global OD_READ_MOSTLY = NULL;
 
 int od_global_init(od_global_t *global, od_instance_t *instance,
 		   od_system_t *system, od_router_t *router, od_cron_t *cron,
@@ -110,7 +111,10 @@ void od_global_read_host_utilization(od_global_t *global, float *cpu,
 
 int od_routing_slot_acquire(od_global_t *global, uint32_t timeout_ms)
 {
-	return mm_sem_timedwait(&global->routing_sem, timeout_ms);
+	od_wait_event_start(OD_WAIT_RATELIMIT_ROUTING);
+	int rc = mm_sem_timedwait(&global->routing_sem, timeout_ms);
+	od_wait_event_end(OD_WAIT_RATELIMIT_ROUTING);
+	return rc;
 }
 
 void od_routing_slot_release(od_global_t *global)

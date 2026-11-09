@@ -11,8 +11,7 @@
 #include <global.h>
 #include <instance.h>
 
-static inline od_client_t *od_client_allocate_internal(od_global_t *global,
-						       char *context)
+static inline od_client_t *od_client_allocate_internal(od_global_t *global)
 {
 	od_client_t *internal_client;
 	internal_client = od_client_allocate();
@@ -36,16 +35,17 @@ static inline od_client_t *od_client_allocate_internal(od_global_t *global,
 	/* set network options */
 	mm_io_set_nodelay(io, instance->config.nodelay);
 	if (instance->config.keepalive > 0) {
-		mm_io_set_keepalive(io, 1, instance->config.keepalive,
-				    instance->config.keepalive_keep_interval,
-				    instance->config.keepalive_probes,
-				    instance->config.keepalive_usr_timeout);
+		mm_io_set_keepalive(
+			io, 1, instance->config.keepalive,
+			instance->config.keepalive_keep_interval,
+			instance->config.keepalive_probes,
+			(int)instance->config.keepalive_usr_timeout_ms);
 	}
 
 	int rc;
 	rc = od_io_prepare(&internal_client->io, io);
 	if (rc == -1) {
-		od_error(&instance->logger, context, internal_client, NULL,
+		od_error(&instance->logger, internal_client, NULL,
 			 "failed to setup internal client io");
 		mm_io_close(io);
 		mm_io_free(io);

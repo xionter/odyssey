@@ -1,0 +1,128 @@
+#!/usr/bin/env python3
+
+import os
+import glob
+import time
+import signal
+import subprocess
+import sys
+import re
+
+ASAN_LOG_PREFIX = os.environ.get('ASAN_LOG_PREFIX', '/asan-output.log')
+TSAN_LOG_PREFIX = os.environ.get('TSAN_LOG_PREFIX', '/tsan-output.log')
+
+
+def get_sanitizer_log(pid, prefix):
+    filename = f'{prefix}.{pid}'
+    if not os.path.exists(filename) or os.path.getsize(filename) == 0:
+        return b''
+
+    with open(filename, 'rb') as logfile:
+        print(f'Found non-empty {filename} log:')
+        data = logfile.read()
+        print(data.decode('utf-8'))
+        return data
+
+
+def asan_log_is_valid(pid):
+    # ASAN_OPTIONS must use the same log prefix.
+    logdata = get_sanitizer_log(pid, ASAN_LOG_PREFIX)
+    warning_count = len(re.findall(rb'==\d+==WARNING', logdata))
+    error_count = len(re.findall(rb'==\d+==ERROR', logdata))
+
+    print(f'Found {error_count} errors and {warning_count} warnings in log')
+
+    return error_count == 0 and warning_count <= 1
+
+
+def tsan_log_is_valid(pid):
+    # TSAN_OPTIONS must use the same log prefix.
+    logdata = get_sanitizer_log(pid, TSAN_LOG_PREFIX)
+    return len(logdata) == 0
+
+from datetime import datetime
+
+
+def get_odyssey_pids():
+    print(subprocess.check_output(
+        'ps aux | grep odyssey', shell=True).decode('utf-8'))
+
+    try:
+        return list(map(int, subprocess.check_output(['pgrep', 'odyssey']).split()))
+    except subprocess.CalledProcessError:
+        # non-zero exit code means that there is no odyssey pids
+        return []
+
+
+def terminate_gracefully(pid, timeout):
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        print(f'Process {pid} already finished or doesnt ever existed')
+        return True
+
+    print(f'{datetime.now()} Waiting {timeout} seconds to {
+          pid} finish after SIGTERM...')
+
+    start = time.time()
+    finished = False
+
+    while time.time() - start < timeout:
+        try:
+            output = subprocess.check_output(['ps', '-p', str(pid)], )
+            print(f'{datetime.now()} {output.decode('utf-8')}')
+            if 'odyssey'.encode('utf-8') not in output:
+                finished = True
+                break
+        except subprocess.CalledProcessError:
+            # non-zero code means there is no process with that pid
+            finished = True
+            break
+
+        time.sleep(0.5)
+
+    print()
+
+    return finished
+
+
+def main():
+    timeout = 5
+
+    if len(sys.argv) > 1:
+        pids = [int(sys.argv[1])]
+    else:
+        pids = get_odyssey_pids()
+    print('Odyssey pids to stop:', ', '.join(list(map(str, pids))))
+
+    for pid in pids:
+        if not terminate_gracefully(pid, timeout):
+            print(f'Process {pid} didnt finish within {timeout} seconds')
+            try:
+                print(subprocess.check_output(['gdb', '-p', str(pid), '--batch', '-ex', 't a a bt']).decode('utf-8'))
+                print(subprocess.check_output(['gdb', '-p', str(pid), '--batch', '-ex', 'source /gdb.py', '-ex', 'mmcoro all bt']).decode('utf-8'))
+            finally:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            exit(1)
+
+    # A sanitizer error can terminate Odyssey before pgrep sees it.
+    log_pids = set(pids)
+    if len(sys.argv) == 1:
+        for prefix in (ASAN_LOG_PREFIX, TSAN_LOG_PREFIX):
+            for filename in glob.glob(f'{glob.escape(prefix)}.*'):
+                suffix = filename[len(prefix) + 1:]
+                if suffix.isdecimal():
+                    log_pids.add(int(suffix))
+
+    for pid in sorted(log_pids):
+        if not asan_log_is_valid(pid) or not tsan_log_is_valid(pid):
+            exit(1)
+
+    exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -57,7 +57,7 @@ static inline tok_info_t pgopts_strtok(const char *str, const char *end,
 	 */
 
 	tok_info_t r;
-	memset(&r, 0, sizeof(struct iovec));
+	memset(&r, 0, sizeof(r));
 
 	if (str == NULL) {
 		str = *prev;
@@ -92,7 +92,8 @@ static inline size_t find_eq_pos(const char *str, size_t len)
 	return len;
 }
 
-static inline size_t unescape(const char *str, size_t len, char *dst)
+static inline int unescape(const char *str, size_t len, char *dst,
+			   size_t dst_size, size_t *out_len)
 {
 	int escape = 0;
 	size_t rlen = 0;
@@ -101,21 +102,26 @@ static inline size_t unescape(const char *str, size_t len, char *dst)
 		if (!escape && str[i] == '\\') {
 			escape = 1;
 		} else {
+			/* reserve one byte for terminating zero */
+			if (rlen + 1 >= dst_size) {
+				return -1;
+			}
 			dst[rlen++] = str[i];
 			escape = 0;
 		}
 	}
 
 	dst[rlen] = 0;
+	*out_len = rlen;
 
-	return rlen;
+	return 0;
 }
 
 static inline int kiwi_parse_option_and_update_var(kiwi_vars_t *vars,
 						   const char *str, size_t len)
 {
 	char name[KIWI_MAX_VAR_SIZE];
-	char val[KIWI_MAX_VAR_SIZE];
+	char val_buf[KIWI_MAX_VAR_SIZE];
 
 	size_t equal_pos = find_eq_pos(str, len);
 	if (equal_pos == len) {
@@ -126,12 +132,41 @@ static inline int kiwi_parse_option_and_update_var(kiwi_vars_t *vars,
 	size_t nlen = equal_pos;
 	size_t vlen = len - (equal_pos + 1);
 
-	nlen = unescape(str, nlen, name);
-	vlen = unescape(str + equal_pos + 1, vlen, val);
+	if (unescape(str, nlen, name, sizeof(name), &nlen) != 0) {
+		return -1;
+	}
+
+	/*
+	 * an unescaped value is never longer than the raw one,
+	 * but it may not fit into the stack buffer - fall back
+	 * to the heap in that case
+	 */
+	char *val = val_buf;
+	char *val_heap = NULL;
+	if (vlen + 1 > sizeof(val_buf)) {
+		val_heap = malloc(vlen + 1);
+		if (val_heap == NULL) {
+			return -1;
+		}
+		val = val_heap;
+	}
+
+	if (unescape(str + equal_pos + 1, vlen, val, vlen + 1, &vlen) != 0) {
+		free(val_heap);
+		return -1;
+	}
 
 	kiwi_long_option_rewrite(name, (int)nlen);
 
-	return kiwi_vars_update(vars, name, (int)nlen + 1, val, (int)vlen + 1);
+	/*
+	 * options may contain arbitrary GUCs unknown to kiwi,
+	 * silently skip them, only malformed tokens are fatal here
+	 */
+	kiwi_vars_update(vars, name, (int)nlen + 1, val, (int)vlen + 1);
+
+	free(val_heap);
+
+	return 0;
 }
 
 int kiwi_parse_options_and_update_vars(kiwi_vars_t *vars, const char *str,

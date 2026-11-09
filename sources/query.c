@@ -14,20 +14,41 @@
 #include <global.h>
 #include <instance.h>
 #include <backend.h>
+#include <client.h>
+#include <tsa.h>
 #include <util.h>
+#include <analyze.h>
 #include <sql/minimal/parser.h>
 #include <sql/full/parser.h>
 #include <sql/full/pg_constants.h>
 
-machine_msg_t *od_query_do(od_server_t *server, char *context,
-			   const char *query, char *param, uint32_t timeout_ms)
+od_config_query_parsing_mode_t od_query_parser_mode(od_client_t *client)
+{
+	if (client->parser_mode >= 0) {
+		return client->parser_mode;
+	}
+	od_instance_t *instance = client->global->instance;
+	od_config_query_parsing_mode_t mode =
+		instance->config.query_parsing.mode;
+	if (mode == OD_CONFIG_QUERY_PARSING_MODE_FULL &&
+	    !od_tsa_auto_route_ro_enabled(client)) {
+		/*
+		 * auto routing is the only consumer of the full-parser-only
+		 * results (is_select) - for clients without it the cheaper
+		 * minimal parser is enough
+		 */
+		mode = OD_CONFIG_QUERY_PARSING_MODE_MINIMAL;
+	}
+	return mode;
+}
+
+machine_msg_t *od_query_do(od_server_t *server, const char *query, char *param,
+			   uint32_t timeout_ms)
 {
 	od_instance_t *instance = server->global->instance;
-	od_debug(&instance->logger, context, server->client, server, "%s",
-		 query);
+	od_debug(&instance->logger, server->client, server, "%s", query);
 
-	if (od_backend_query_send(server, context, query, param,
-				  strlen(query) + 1,
+	if (od_backend_query_send(server, query, param, strlen(query) + 1,
 				  timeout_ms) == NOT_OK_RESPONSE) {
 		return NULL;
 	}
@@ -40,9 +61,8 @@ machine_msg_t *od_query_do(od_server_t *server, char *context,
 		msg = od_read(&server->io, timeout_ms, OD_READ_BE);
 		if (msg == NULL) {
 			if (!machine_timedout()) {
-				od_error(&instance->logger, context,
-					 server->client, server,
-					 "read error: %s",
+				od_error(&instance->logger, server->client,
+					 server, "read error: %s",
 					 od_io_error(&server->io));
 			}
 			if (ret_msg) {
@@ -55,12 +75,12 @@ machine_msg_t *od_query_do(od_server_t *server, char *context,
 		kiwi_be_type_t type;
 		type = *(char *)machine_msg_data(msg);
 
-		od_debug(&instance->logger, context, server->client, server,
-			 "%s", kiwi_be_type_to_string(type));
+		od_debug(&instance->logger, server->client, server, "%s",
+			 kiwi_be_type_to_string(type));
 
 		switch (type) {
 		case KIWI_BE_ERROR_RESPONSE:
-			od_backend_error(server, context, machine_msg_data(msg),
+			od_backend_error(server, machine_msg_data(msg),
 					 machine_msg_size(msg));
 			goto error;
 		case KIWI_BE_ROW_DESCRIPTION:
@@ -160,11 +180,13 @@ static void parse_minimal(const char *query, uint32_t query_len,
 typedef struct {
 	char *errbuf;
 	size_t size;
+	int fired;
 } parse_error_cb_arg_t;
 
 static void full_on_error(const char *msg, void *userdata)
 {
 	parse_error_cb_arg_t *a = userdata;
+	a->fired = 1;
 	strncpy(a->errbuf, msg, a->size - 1);
 	a->errbuf[a->size - 1] = '\0';
 }
@@ -363,7 +385,8 @@ static const char *safe_function_names[] = {
 	"xmlagg",
 };
 
-static int is_safe_function_name(const char *name)
+static int is_safe_function_name(const od_config_query_parsing_t *parsing,
+				 const char *name)
 {
 	size_t i;
 
@@ -373,10 +396,20 @@ static int is_safe_function_name(const char *name)
 		}
 	}
 
+	if (parsing != NULL) {
+		for (i = 0; i < parsing->standby_function_names_count; i++) {
+			if (strcmp(parsing->standby_function_names[i], name) ==
+			    0) {
+				return 1;
+			}
+		}
+	}
+
 	return 0;
 }
 
-static int is_safe_function_call(FuncCall *fcall)
+static int is_safe_function_call(const od_config_query_parsing_t *parsing,
+				 FuncCall *fcall)
 {
 	List *names = fcall->funcname;
 
@@ -390,16 +423,21 @@ static int is_safe_function_call(FuncCall *fcall)
 		return 0;
 	}
 
-	return is_safe_function_name(strVal(llast(names)));
+	return is_safe_function_name(parsing, strVal(llast(names)));
 }
 
-static int has_function_call_walker(Node *node)
+static int has_function_call_walker(const od_config_query_parsing_t *parsing,
+				    Node *node)
 {
 	if (node == NULL) {
 		return 0;
 	}
 
-#define WALK(n) has_function_call_walker((Node *)(n))
+	if (machinarium_check_stack_depth()) {
+		return 1;
+	}
+
+#define WALK(n) has_function_call_walker(parsing, (Node *)(n))
 
 	switch (nodeTag(node)) {
 	/* primitive node types with no subnodes */
@@ -596,7 +634,7 @@ static int has_function_call_walker(Node *node)
 		FuncCall *fcall = (FuncCall *)node;
 
 		/* known safe functions are descended into, not reported */
-		if (is_safe_function_call(fcall)) {
+		if (is_safe_function_call(parsing, fcall)) {
 			return WALK(fcall->args) || WALK(fcall->agg_order) ||
 			       WALK(fcall->agg_filter) || WALK(fcall->over);
 		}
@@ -751,16 +789,18 @@ static int has_function_call_walker(Node *node)
 	return 0;
 }
 
-static int has_function_calls(Node *node)
+static int has_function_calls(const od_config_query_parsing_t *parsing,
+			      Node *node)
 {
 	if (node == NULL || !IsA(node, SelectStmt)) {
 		return 0;
 	}
 
-	return has_function_call_walker(node);
+	return has_function_call_walker(parsing, node);
 }
 
-static int is_select_explain(ExplainStmt *estmt)
+static int is_select_explain(const od_config_query_parsing_t *parsing,
+			     ExplainStmt *estmt)
 {
 	Node *query = estmt->query;
 	ListCell *lc;
@@ -781,13 +821,14 @@ static int is_select_explain(ExplainStmt *estmt)
 			return 1;
 		}
 
-		return !has_function_calls(query);
+		return !has_function_calls(parsing, query);
 	}
 
 	return 0;
 }
 
-static int is_select_select(SelectStmt *sstmt)
+static int is_select_select(const od_config_query_parsing_t *parsing,
+			    SelectStmt *sstmt)
 {
 	if (sstmt->intoClause != NULL || sstmt->lockingClause != NULL) {
 		return 0;
@@ -807,11 +848,12 @@ static int is_select_select(SelectStmt *sstmt)
 		}
 	}
 
-	return !has_function_calls((Node *)sstmt);
+	return !has_function_calls(parsing, (Node *)sstmt);
 }
 
 static void parse_full(const char *query, uint32_t query_len,
-		       od_linear_alloc_t *arena, od_query_ctx_t *ctx)
+		       od_linear_alloc_t *arena, od_query_ctx_t *ctx,
+		       const od_config_query_parsing_t *parsing)
 {
 	char errbuf[256];
 	parse_error_cb_arg_t ea = { .errbuf = errbuf, .size = sizeof(errbuf) };
@@ -824,6 +866,10 @@ static void parse_full(const char *query, uint32_t query_len,
 	ctx->s2_long = NULL;
 
 	if (tree == NULL) {
+		if (!ea.fired) {
+			od_query_ctx_set(ctx, OD_QUERY_CTX_IS_EMPTY);
+			return;
+		}
 		goto error;
 	}
 
@@ -842,6 +888,8 @@ static void parse_full(const char *query, uint32_t query_len,
 		goto error;
 	}
 
+	od_query_ctx_check_reserved_name(ctx, stmt_pstmt_name(node));
+
 	if (IsA(node, VariableShowStmt)) {
 		VariableShowStmt *vsstmt = castNode(VariableShowStmt, node);
 		od_snprintf(ctx->s1, sizeof(ctx->s1), "%s", vsstmt->name);
@@ -849,11 +897,15 @@ static void parse_full(const char *query, uint32_t query_len,
 		od_query_ctx_set(ctx, OD_QUERY_CTX_IS_SELECT);
 	} else if (IsA(node, VariableSetStmt)) {
 		VariableSetStmt *vsstmt = castNode(VariableSetStmt, node);
-		if (vsstmt->kind == VAR_SET_VALUE && vsstmt->args != NULL &&
-		    list_length(vsstmt->args) == 1) {
+		if (vsstmt->kind == VAR_SET_DEFAULT ||
+		    (vsstmt->kind == VAR_SET_VALUE && vsstmt->args != NULL &&
+		     list_length(vsstmt->args) == 1)) {
 			od_query_ctx_set(ctx, OD_QUERY_CTX_IS_SET);
 			od_snprintf(ctx->s1, sizeof(ctx->s1), "%s",
 				    vsstmt->name);
+			if (vsstmt->kind == VAR_SET_DEFAULT) {
+				return;
+			}
 
 			Node *arg = linitial(vsstmt->args);
 			if (!IsA(arg, A_Const)) {
@@ -900,10 +952,16 @@ static void parse_full(const char *query, uint32_t query_len,
 			od_snprintf(ctx->s1, sizeof(ctx->s1), "%s",
 				    dstmt->name);
 		}
+	} else if (IsA(node, ExecuteStmt)) {
+		ExecuteStmt *estmt = castNode(ExecuteStmt, node);
+		od_query_ctx_set(ctx, OD_QUERY_CTX_IS_EXECUTE);
+		od_snprintf(ctx->s1, sizeof(ctx->s1), "%s", estmt->name);
+		ctx->name_location.start = estmt->name_location;
+		ctx->name_location.end = estmt->name_end_location;
 	} else if (IsA(node, SelectStmt)) {
 		/* inspired by https://github.com/pgpool/pgpool2/blob/91c8522/src/protocol/pool_process_query.c#L1140 */
 		SelectStmt *sstmt = castNode(SelectStmt, node);
-		if (is_select_select(sstmt)) {
+		if (is_select_select(parsing, sstmt)) {
 			od_query_ctx_set(ctx, OD_QUERY_CTX_IS_SELECT);
 		}
 	} else if (IsA(node, CopyStmt)) {
@@ -913,7 +971,7 @@ static void parse_full(const char *query, uint32_t query_len,
 		}
 	} else if (IsA(node, ExplainStmt)) {
 		ExplainStmt *estmt = castNode(ExplainStmt, node);
-		if (is_select_explain(estmt)) {
+		if (is_select_explain(parsing, estmt)) {
 			od_query_ctx_set(ctx, OD_QUERY_CTX_IS_SELECT);
 		}
 	}
@@ -943,7 +1001,7 @@ void od_query_parse_fill_ctx(const char *query, uint32_t query_len,
 	if (parsing->mode == OD_CONFIG_QUERY_PARSING_MODE_MINIMAL) {
 		parse_minimal(query, query_len, arena, ctx);
 	} else if (parsing->mode == OD_CONFIG_QUERY_PARSING_MODE_FULL) {
-		parse_full(query, query_len, arena, ctx);
+		parse_full(query, query_len, arena, ctx, parsing);
 	} else {
 		od_release_assert(0);
 	}

@@ -1,2 +1,5 @@
 test: ports
 test: users
+test: execute_on_host
+test: execute_on_host_tsa_mismatch
+test: startup_params

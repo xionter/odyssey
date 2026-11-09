@@ -87,6 +87,19 @@ MACHINE_API void machinarium_free(void);
 
 MACHINE_API int64_t machine_create(char *name, machine_coroutine_t, void *arg);
 
+/*
+ * Reserve a consecutive block of machine ids: the next `count` ids are
+ * taken atomically under the machine manager lock and can then be
+ * assigned to machines created via machine_create_at().  Machines
+ * created between the reservation and the block creation get ids after
+ * the reserved block.
+ */
+MACHINE_API int64_t machine_reserve_ids(int count);
+
+/* create a machine with an id reserved by machine_reserve_ids() */
+MACHINE_API int64_t machine_create_at(uint64_t machine_id, char *name,
+				      machine_coroutine_t, void *arg);
+
 MACHINE_API void machine_stop_current(void);
 
 MACHINE_API int machine_active(void);
@@ -98,6 +111,8 @@ MACHINE_API void **machine_thread_private(void);
 MACHINE_API int machine_wait(uint64_t machine_id);
 
 MACHINE_API int machine_stop(uint64_t machine_id);
+
+MACHINE_API int machinarium_check_stack_depth(void);
 
 /* time */
 
@@ -200,6 +215,11 @@ machine_channel_assign_limit_policy(machine_channel_t *obj, int limit,
 MACHINE_API mm_retcode_t machine_channel_write(machine_channel_t *,
 					       machine_msg_t *);
 
+/*
+ * A delivered message is returned even if the wait also times out or is
+ * cancelled. NULL means no message was delivered; inspect machine_errno()
+ * only then. Returning a message does not clear coroutine cancellation.
+ */
 MACHINE_API machine_msg_t *machine_channel_read(machine_channel_t *,
 						uint32_t time_ms);
 
@@ -236,20 +256,6 @@ MACHINE_API int machine_getsockname(mm_io_t *, struct sockaddr *, int *);
 
 MACHINE_API int machine_getpeername(mm_io_t *, struct sockaddr *, int *);
 
-/* iov */
-
-MACHINE_API machine_iov_t *machine_iov_create(void);
-
-MACHINE_API void machine_iov_free(machine_iov_t *);
-
-MACHINE_API int machine_iov_add_pointer(machine_iov_t *, void *, int);
-
-MACHINE_API int machine_iov_add(machine_iov_t *, machine_msg_t *);
-
-MACHINE_API int machine_iov_pending(machine_iov_t *);
-
-MACHINE_API size_t machine_iov_inflight_size(machine_iov_t *iov);
-
 /* read */
 
 MACHINE_API ssize_t machine_read_raw(mm_io_t *, void *, size_t);
@@ -267,7 +273,7 @@ MACHINE_API ssize_t machine_write_raw(mm_io_t *, const void *, size_t,
 				      size_t *);
 
 MACHINE_API ssize_t machine_writev_raw(mm_io_t *, const struct iovec *iov,
-				       int iovcnt);
+				       int iovcnt, size_t *processed);
 
 MACHINE_API int machine_write(mm_io_t *, machine_msg_t *, uint32_t time_ms);
 

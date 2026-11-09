@@ -1,5 +1,7 @@
 #pragma once
 
+#include <pg_cat.h>
+
 #define NULL_MSG_LEN -1
 /*
  * kiwi.
@@ -11,7 +13,7 @@ KIWI_API static inline machine_msg_t *
 kiwi_be_write_error_as(machine_msg_t *msg, const char *severity,
 		       const char *code, const char *detail, int detail_len,
 		       const char *hint, int hint_len, const char *message,
-		       int len)
+		       int len, int position)
 {
 	size_t size = 1 /* S */ + 6 + 1 /* C */ + 6 + 1 /* M */ + len + 1 +
 		      1 /* zero */;
@@ -20,6 +22,14 @@ kiwi_be_write_error_as(machine_msg_t *msg, const char *severity,
 	}
 	if (hint && hint_len > 0) {
 		size += 1 + /* H */ +hint_len + 1;
+	}
+	/* error cursor position, 1-based index into the query string */
+	char position_str[16];
+	int position_len = 0;
+	if (position > 0) {
+		position_len = snprintf(position_str, sizeof(position_str),
+					"%d", position);
+		size += 1 + /* P */ +position_len + 1;
 	}
 	int offset = 0;
 	if (msg) {
@@ -47,6 +57,11 @@ kiwi_be_write_error_as(machine_msg_t *msg, const char *severity,
 		kiwi_write(&pos, hint, hint_len);
 		kiwi_write8(&pos, 0);
 	}
+	if (position_len > 0) {
+		kiwi_write8(&pos, 'P');
+		kiwi_write(&pos, position_str, position_len);
+		kiwi_write8(&pos, 0);
+	}
 	kiwi_write8(&pos, 'M');
 	kiwi_write(&pos, message, len);
 	kiwi_write8(&pos, 0);
@@ -55,10 +70,17 @@ kiwi_be_write_error_as(machine_msg_t *msg, const char *severity,
 }
 
 KIWI_API static inline machine_msg_t *
-kiwi_be_write_error(machine_msg_t *msg, char *code, char *message, int len)
+kiwi_be_write_error_pos(machine_msg_t *msg, char *code, char *message, int len,
+			int position)
 {
 	return kiwi_be_write_error_as(msg, "ERROR", code, NULL, 0, NULL, 0,
-				      message, len);
+				      message, len, position);
+}
+
+KIWI_API static inline machine_msg_t *
+kiwi_be_write_error(machine_msg_t *msg, char *code, char *message, int len)
+{
+	return kiwi_be_write_error_pos(msg, code, message, len, 0);
 }
 
 KIWI_API static inline machine_msg_t *
@@ -67,7 +89,7 @@ kiwi_be_write_error_fatal(machine_msg_t *msg, const char *code,
 			  int hintlen, const char *message, int len)
 {
 	return kiwi_be_write_error_as(msg, "FATAL", code, detail, detlen, hint,
-				      hintlen, message, len);
+				      hintlen, message, len, 0);
 }
 
 KIWI_API static inline machine_msg_t *
@@ -75,7 +97,7 @@ kiwi_be_write_error_panic(machine_msg_t *msg, char *code, char *message,
 			  int len)
 {
 	return kiwi_be_write_error_as(msg, "PANIC", code, NULL, 0, NULL, 0,
-				      message, len);
+				      message, len, 0);
 }
 
 KIWI_API static inline machine_msg_t *
@@ -293,10 +315,13 @@ kiwi_be_write_authentication_sasl_final(machine_msg_t *msg, char *data,
 }
 
 KIWI_API static inline machine_msg_t *
-kiwi_be_write_backend_key_data(machine_msg_t *msg, uint32_t pid, uint32_t key)
+kiwi_be_write_backend_key_data(machine_msg_t *msg, const kiwi_key_t *key)
 {
-	size_t size =
-		sizeof(kiwi_header_t) + sizeof(uint32_t) + sizeof(uint32_t);
+	if (kiwi_unlikely(key->key_len < KIWI_CANCEL_KEY_MIN_LEN ||
+			  key->key_len > KIWI_CANCEL_KEY_MAX_LEN)) {
+		return NULL;
+	}
+	size_t size = sizeof(kiwi_header_t) + sizeof(uint32_t) + key->key_len;
 	int offset = 0;
 	if (msg) {
 		offset = machine_msg_size(msg);
@@ -308,10 +333,9 @@ kiwi_be_write_backend_key_data(machine_msg_t *msg, uint32_t pid, uint32_t key)
 	char *pos;
 	pos = (char *)machine_msg_data(msg) + offset;
 	kiwi_write8(&pos, KIWI_BE_BACKEND_KEY_DATA);
-	kiwi_write32(&pos,
-		     sizeof(uint32_t) + sizeof(uint32_t) + sizeof(uint32_t));
-	kiwi_write32(&pos, pid);
-	kiwi_write32(&pos, key);
+	kiwi_write32(&pos, size - 1);
+	kiwi_write32(&pos, key->key_pid);
+	kiwi_write(&pos, key->key, key->key_len);
 	return msg;
 }
 
@@ -706,27 +730,27 @@ kiwi_be_write_row_descriptionf(machine_msg_t *msg, char *fmt, ...)
 		case 's':
 			rc = kiwi_be_write_row_description_add(
 				msg, begin_offset, name, name_len, 0, 0,
-				25 /* TEXTOID */, -1, 0, 0);
+				PG_TEXTOID, PG_TEXT_LEN, 0, 0);
 			break;
 		case 'd':
 			rc = kiwi_be_write_row_description_add(
 				msg, begin_offset, name, name_len, 0, 0,
-				23 /* INT4OID */, 4, 0, 0);
+				PG_INT4OID, PG_INT4_LEN, 0, 0);
 			break;
 		case 'l':
 			rc = kiwi_be_write_row_description_add(
 				msg, begin_offset, name, name_len, 0, 0,
-				20 /* INT8OID */, 8, 0, 0);
+				PG_INT8OID, PG_INT8_LEN, 0, 0);
 			break;
 		case 'b':
 			rc = kiwi_be_write_row_description_add(
 				msg, begin_offset, name, name_len, 0, 0,
-				16 /* BOOLOID */, 1, 0, 0);
+				PG_BOOLOID, PG_BOOL_LEN, 0, 0);
 			break;
 		case 'f':
 			rc = kiwi_be_write_row_description_add(
 				msg, begin_offset, name, name_len, 0, 0,
-				700 /* FLOAT4OID */, 4, 0, 0);
+				PG_FLOAT4OID, PG_FLOAT4_LEN, 0, 0);
 			break;
 		}
 		if (rc == -1) {

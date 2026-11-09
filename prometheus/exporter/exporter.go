@@ -25,20 +25,22 @@ import (
 )
 
 const (
-	namespace                  = "odyssey"
-	metricsHandlePath          = "/metrics"
-	showVersionCommand         = "show version;"
-	showVersionExtendedCommand = "show version_extended;"
-	showListsCommand           = "show lists;"
-	showInstanceCommand        = "show instance;"
-	showIsPausedCommand        = "show is_paused;"
-	showErrorsCommand          = "show errors;"
-	showStatsCommand           = "show stats;"
-	showDatabasesCommand       = "show databases;"
-	showPoolsExtendedCommand   = "show pools_extended;"
-	poolModeColumnName         = "pool_mode"
-	queryQuantilePrefix        = "query_"
-	transactionQuantilePrefix  = "transaction_"
+	namespace                    = "odyssey"
+	metricsHandlePath            = "/metrics"
+	showVersionCommand           = "show version;"
+	showVersionExtendedCommand   = "show version_extended;"
+	showListsCommand             = "show lists;"
+	showInstanceCommand          = "show instance;"
+	showIsPausedCommand          = "show is_paused;"
+	showErrorsCommand            = "show errors;"
+	showStatsCommand             = "show stats;"
+	showWaitEventsCommand        = "show wait_events;"
+	showDatabasesCommand         = "show databases;"
+	showPoolsExtendedCommand     = "show pools_extended;"
+	poolModeColumnName           = "pool_mode"
+	queryQuantilePrefix          = "query_"
+	transactionQuantilePrefix    = "transaction_"
+	clientLifetimeQuantilePrefix = "client_lifetime_"
 )
 
 var (
@@ -158,6 +160,31 @@ var (
 		"Total TCP connections established for the route",
 		[]string{"user", "database"}, nil,
 	)
+	routeClientConnectionsCreatedTotalDescription = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "route", "client_connections_created_total"),
+		"Total external client connections accepted into the route",
+		[]string{"user", "database"}, nil,
+	)
+	routeClientConnectionsClosedTotalDescription = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "route", "client_connections_closed_total"),
+		"Total external client connections closed",
+		[]string{"user", "database"}, nil,
+	)
+	routeServerConnectionsCreatedTotalDescription = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "route", "server_connections_created_total"),
+		"Total backend transport connections established for the route",
+		[]string{"user", "database"}, nil,
+	)
+	routeServerConnectionsClosedTotalDescription = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "route", "server_connections_closed_total"),
+		"Total backend connections closed or removed for closure from the route",
+		[]string{"user", "database"}, nil,
+	)
+	routeServerConnectionsReturnedTotalDescription = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "route", "server_connections_returned_total"),
+		"Total backend connections returned by clients to the pool",
+		[]string{"user", "database"}, nil,
+	)
 
 	routeQueryDurationSecondsDescription = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "route", "query_duration_seconds"),
@@ -171,10 +198,22 @@ var (
 		[]string{"user", "database", "quantile"}, nil,
 	)
 
+	routeClientLifetimeSecondsDescription = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "route", "client_lifetime_seconds"),
+		"Route client lifetime quantiles for disconnected clients",
+		[]string{"user", "database", "quantile"}, nil,
+	)
+
 	errorsTotalDescription = prometheus.NewDesc(
 		prometheus.BuildFQName(namespace, "errors", "total"),
 		"Total number of Odyssey errors grouped by type",
 		[]string{"type"}, nil,
+	)
+
+	waitEventCountDescription = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "wait_events", "count"),
+		"Number of clients currently waiting on each wait event",
+		[]string{"wait_event_type", "wait_event"}, nil,
 	)
 
 	listMetricNameToDescription = map[string]*(prometheus.Desc){
@@ -242,9 +281,16 @@ var (
 		routeBytesReceivedTotalDescription,
 		routeBytesSentTotalDescription,
 		routeTCPConnectionsTotalDescription,
+		routeClientConnectionsCreatedTotalDescription,
+		routeClientConnectionsClosedTotalDescription,
+		routeServerConnectionsCreatedTotalDescription,
+		routeServerConnectionsClosedTotalDescription,
+		routeServerConnectionsReturnedTotalDescription,
 		routeQueryDurationSecondsDescription,
 		routeTransactionDurationSecondsDescription,
+		routeClientLifetimeSecondsDescription,
 		errorsTotalDescription,
+		waitEventCountDescription,
 		serverPoolStateRouteDescription,
 	}
 )
@@ -348,6 +394,26 @@ var poolsExtendedColumnToMetric = map[string]poolColumnMetricDesc{
 		desc:      routeTCPConnectionsTotalDescription,
 		valueType: prometheus.CounterValue,
 	},
+	"client_connections": {
+		desc:      routeClientConnectionsCreatedTotalDescription,
+		valueType: prometheus.CounterValue,
+	},
+	"client_disconnections": {
+		desc:      routeClientConnectionsClosedTotalDescription,
+		valueType: prometheus.CounterValue,
+	},
+	"server_connections": {
+		desc:      routeServerConnectionsCreatedTotalDescription,
+		valueType: prometheus.CounterValue,
+	},
+	"server_disconnections": {
+		desc:      routeServerConnectionsClosedTotalDescription,
+		valueType: prometheus.CounterValue,
+	},
+	"server_detaches": {
+		desc:      routeServerConnectionsReturnedTotalDescription,
+		valueType: prometheus.CounterValue,
+	},
 }
 
 // unified state metric for server pool
@@ -449,6 +515,7 @@ func (exporter *Exporter) collectWithDB(ctx context.Context, ch chan<- prometheu
 	runStep("is_paused", func() error { return exporter.sendIsPausedMetric(ctx, ch, db) })
 	runStep("errors", func() error { return exporter.sendErrorMetrics(ctx, ch, db) })
 	runStep("stats", func() error { return exporter.sendStatsMetrics(ctx, ch, db) })
+	runStep("wait_events", func() error { return exporter.sendWaitEventMetrics(ctx, ch, db) })
 
 	var poolCapacities map[routeKey]float64
 	runStep("databases", func() error {
@@ -838,6 +905,49 @@ func (exporter *Exporter) sendErrorMetrics(ctx context.Context, ch chan<- promet
 	return nil
 }
 
+func (exporter *Exporter) sendWaitEventMetrics(ctx context.Context, ch chan<- prometheus.Metric, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, showWaitEventsCommand)
+	if err != nil {
+		return fmt.Errorf("error getting wait events: %w", err)
+	}
+	defer rows.Close()
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return fmt.Errorf("can't get columns of wait events")
+	}
+	if len(columns) != 3 || columns[0] != "wait_event_type" || columns[1] != "wait_event" || columns[2] != "count" {
+		return fmt.Errorf("invalid format of wait events output")
+	}
+
+	var waitEventType string
+	var waitEvent string
+	var count sql.RawBytes
+	for rows.Next() {
+		if err = rows.Scan(&waitEventType, &waitEvent, &count); err != nil {
+			return fmt.Errorf("error scanning wait events row: %w", err)
+		}
+
+		value, err := strconv.ParseFloat(string(count), 64)
+		if err != nil {
+			return fmt.Errorf("can't parse count of %q: %w", string(count), err)
+		}
+
+		ch <- prometheus.MustNewConstMetric(
+			waitEventCountDescription,
+			prometheus.GaugeValue,
+			value,
+			waitEventType, waitEvent,
+		)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating wait events rows: %w", err)
+	}
+
+	return nil
+}
+
 func (exporter *Exporter) sendStatsMetrics(ctx context.Context, ch chan<- prometheus.Metric, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, showStatsCommand)
 	if err != nil {
@@ -1137,6 +1247,21 @@ func (exporter *Exporter) processPoolRow(columns []string, values []any, capacit
 				routeTransactionDurationSecondsDescription,
 				prometheus.GaugeValue,
 				value,
+				user, database, quantile,
+			)
+			continue
+		}
+
+		if strings.HasPrefix(columnName, clientLifetimeQuantilePrefix) {
+			value, _, err := extractFloat(val, columnName)
+			if err != nil {
+				return err
+			}
+			quantile := strings.TrimPrefix(columnName, clientLifetimeQuantilePrefix)
+			ch <- prometheus.MustNewConstMetric(
+				routeClientLifetimeSecondsDescription,
+				prometheus.GaugeValue,
+				value/1e6,
 				user, database, quantile,
 			)
 			continue

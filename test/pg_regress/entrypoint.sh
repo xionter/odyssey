@@ -5,28 +5,33 @@ set -eux
 PG_REGRESS=$(pg_config --libdir)/postgresql/pgxs/src/test/regress/pg_regress
 REGRESS_DIR=/home/postgres/regress
 
+# The container runs as postgres, which cannot create logs in /.
+SANITIZER_LOG_DIR=/tmp/odyssey-sanitizer
+mkdir -p "${SANITIZER_LOG_DIR}"
+export ASAN_LOG_PREFIX=${SANITIZER_LOG_DIR}/asan-output.log
+export TSAN_LOG_PREFIX=${SANITIZER_LOG_DIR}/tsan-output.log
+export ASAN_OPTIONS="log_path=${ASAN_LOG_PREFIX} fast_unwind_on_malloc=0"
+export TSAN_OPTIONS="log_path=${TSAN_LOG_PREFIX}"
+
 PGDIR=/home/postgres/pgdir
 PGDIRREPL1=/home/postgres/pgrepl1
 PGDIRREPL2=/home/postgres/pgrepl2
+PGDIRREPL3=/home/postgres/pgrepl3
+PGDIRREPL4=/home/postgres/pgrepl4
+
+trap 'ody-stop || exit 1' EXIT
+
+# for test scripts that stop/start replicas
+export PGDIR PGDIRREPL1 PGDIRREPL2 PGDIRREPL3 PGDIRREPL4
 
 do_test() {
     local name=$1
     local port=$2
     local user=$3
 
-    export ASAN_OPTIONS="log_path=/asan-output.log fast_unwind_on_malloc=0"
-    export TSAN_OPTIONS="log_path=/tsan-output.log"
-    odyssey ${REGRESS_DIR}/conf/${name}
+    PGPORT="$port" ody-start "${REGRESS_DIR}/conf/${name}" postgres postgres
 
-    local it=0
-    until (( it == 50 )) || pg_isready -h localhost -p ${port} -U postgres -d postgres; do
-        echo "Wait for odyssey..."
-        echo "$(( it++ ))"
-        sleep 0.1
-    done
-    (( it < 50 ))
-
-    PGTEST_PORT="${port}" PGTEST_DIR="${REGRESS_DIR}/tests/${name}" PGTEST_USER="${user}" PGTEST_DB=postgres ${PG_REGRESS} \
+    PGTEST_PORT="${port}" PGTEST_DIR="${REGRESS_DIR}/tests/${name}" PGTEST_USER="${user}" PGTEST_DB=postgres PGTEST_CONF="${REGRESS_DIR}/conf/${name}" ${PG_REGRESS} \
         --debug \
         --host=localhost \
         --port=${port} \
@@ -42,6 +47,32 @@ do_test() {
             echo "====== OUT ======="
             cat ${REGRESS_DIR}/tests/${name}/regression.out || true
 
+            exit 1
+        }
+
+    ody-stop
+}
+
+# Run the native isolation suite in the same container as pg_regress.
+do_isolation_test() {
+    local port=6432
+
+    odyssey ${REGRESS_DIR}/conf/isolation
+
+    local it=0
+    until (( it == 50 )) || pg_isready -h localhost -p ${port} -U postgres -d postgres; do
+        echo 'Wait for odyssey...'
+        echo "$(( it++ ))"
+        sleep 0.1
+    done
+    (( it < 50 ))
+
+    PG_ISOLATION_REGRESS=/postgres/src/test/isolation/pg_isolation_regress \
+    PGHOST=localhost PGPORT=${port} PGUSER=postgres PGDATABASE=postgres \
+        /home/postgres/isolation/run_tests.sh || {
+            echo '====== ISOLATION DIFFS ======='
+            cat /home/postgres/isolation/output/regression.diffs || true
+            cat /home/postgres/isolation/output/regression.out || true
             ody-stop
             exit 1
         }
@@ -51,11 +82,15 @@ do_test() {
 
 pg_ctl stop -D ${PGDIRREPL1} || true
 pg_ctl stop -D ${PGDIRREPL2} || true
+pg_ctl stop -D ${PGDIRREPL3} || true
+pg_ctl stop -D ${PGDIRREPL4} || true
 pg_ctl stop -D ${PGDIR} || true
 
 rm -rf ${PGDIR} || true
 rm -rf ${PGDIRREPL1} || true
 rm -rf ${PGDIRREPL2} || true
+rm -rf ${PGDIRREPL3} || true
+rm -rf ${PGDIRREPL4} || true
 
 initdb -D ${PGDIR}
 echo "session_preload_libraries = 'transaction_transients_trace'" >> ${PGDIR}/postgresql.conf
@@ -73,12 +108,30 @@ pg_basebackup -D ${PGDIRREPL2} -p 5432 -R
 echo "port = 5434" >> ${PGDIRREPL2}/postgresql.conf
 pg_ctl start -D ${PGDIRREPL2} -l ${PGDIRREPL2}/log.txt
 
+pg_basebackup -D ${PGDIRREPL3} -p 5432 -R
+echo "port = 5435" >> ${PGDIRREPL3}/postgresql.conf
+pg_ctl start -D ${PGDIRREPL3} -l ${PGDIRREPL3}/log.txt
+
+pg_basebackup -D ${PGDIRREPL4} -p 5432 -R
+echo "port = 5436" >> ${PGDIRREPL4}/postgresql.conf
+pg_ctl start -D ${PGDIRREPL4} -l ${PGDIRREPL4}/log.txt
+
 do_test pin_on_listen 6432 postgres
+
+do_test default_pool 6432 postgres
+
+do_test default_pool_session 6432 postgres
+
+do_test reload_default_pool 6432 postgres
 
 do_test simple 6432 suser
 do_test simple 6432 tuser
 
 do_test broken_conn 6432 tuser
+
+do_test pstmt 6432 tuser
+
+do_test stack_guard 6432 suser
 
 do_test balancer 6432 postgres
 
@@ -86,4 +139,10 @@ do_test listen_balancer 6432 postgres
 
 do_test tsa 6432 postgres
 
+do_test tsa_5node 6432 postgres
+
 do_test az_aware 6432 postgres
+
+do_test tsa_promote 6432 postgres
+
+do_isolation_test

@@ -120,6 +120,14 @@ int od_storage_watchdog_free(od_storage_watchdog_t *watchdog)
 		od_free(watchdog->query);
 	}
 
+	if (watchdog->route_usr) {
+		od_free(watchdog->route_usr);
+	}
+
+	if (watchdog->route_db) {
+		od_free(watchdog->route_db);
+	}
+
 	machine_wait_flag_destroy(watchdog->online);
 
 	od_free(watchdog);
@@ -226,6 +234,37 @@ od_storage_endpoint_t *od_storage_find_endpoint(od_rule_storage_t *storage,
 	return NULL;
 }
 
+od_storage_endpoint_t *
+od_storage_find_endpoint_by_host(od_rule_storage_t *storage,
+				 const od_address_t *address)
+{
+	int port = address->port;
+	if (port == 0) {
+		port = storage->port;
+	}
+
+	for (size_t i = 0; i < storage->endpoints_count; ++i) {
+		od_storage_endpoint_t *e = &storage->endpoints[i];
+
+		if (e->address.type != address->type) {
+			continue;
+		}
+
+		if (strcmp(e->address.host, address->host) != 0) {
+			continue;
+		}
+
+		if (address->type == OD_ADDRESS_TYPE_TCP &&
+		    e->address.port != port) {
+			continue;
+		}
+
+		return e;
+	}
+
+	return NULL;
+}
+
 static inline od_client_t *
 od_storage_watchdog_prepare_client(od_storage_watchdog_t *watchdog)
 {
@@ -234,10 +273,9 @@ od_storage_watchdog_prepare_client(od_storage_watchdog_t *watchdog)
 	od_instance_t *instance = global->instance;
 
 	od_client_t *watchdog_client;
-	watchdog_client =
-		od_client_allocate_internal(global, "storage-watchdog");
+	watchdog_client = od_client_allocate_internal(global);
 	if (watchdog_client == NULL) {
-		od_error(&instance->logger, "watchdog", NULL, NULL,
+		od_error(&instance->logger, NULL, NULL,
 			 "route storage watchdog failed to allocate client");
 		return NULL;
 	}
@@ -256,12 +294,12 @@ od_storage_watchdog_prepare_client(od_storage_watchdog_t *watchdog)
 
 	od_router_status_t status;
 	status = od_router_route(router, watchdog_client);
-	od_debug(&instance->logger, "watchdog", watchdog_client, NULL,
+	od_debug(&instance->logger, watchdog_client, NULL,
 		 "routing to internal wd route status: %s",
 		 od_router_status_to_str(status));
 
 	if (status != OD_ROUTER_OK) {
-		od_error(&instance->logger, "watchdog", watchdog_client, NULL,
+		od_error(&instance->logger, watchdog_client, NULL,
 			 "route storage watchdog failed: %s",
 			 od_router_status_to_str(status));
 
@@ -296,17 +334,16 @@ od_storage_create_and_connect_watchdog_client(od_storage_watchdog_t *watchdog,
 	od_client_t *client;
 	client = od_storage_watchdog_prepare_client(watchdog);
 	if (client == NULL) {
-		od_error(&instance->logger, "watchdog", NULL, NULL,
+		od_error(&instance->logger, NULL, NULL,
 			 "route storage watchdog failed to prepare client");
 
 		return NULL;
 	}
 
 	od_frontend_status_t status;
-	status = od_attach_extended_endpoint(instance, "watchdog", router,
-					     client, endp);
+	status = od_attach_extended_endpoint(instance, router, client, endp);
 	if (status != OD_OK) {
-		od_error(&instance->logger, "watchdog", client, NULL,
+		od_error(&instance->logger, client, NULL,
 			 "attach failed with status = %d (%s)", status,
 			 od_frontend_status_to_str(status));
 
@@ -334,7 +371,7 @@ static inline void watchdog_update_endpoint(od_storage_watchdog_t *watchdog,
 	od_server_t *server = client->server;
 
 	/* try to update, ignore errors - cant do nothing with it */
-	od_backend_update_endpoint_status(instance, client, server, "watchdog",
+	od_backend_update_endpoint_status(instance, client, server,
 					  watchdog->query, endp);
 
 	od_storage_watchdog_close_client(watchdog, client);
@@ -374,14 +411,14 @@ od_storage_watchdog_do_polling_loop(od_storage_watchdog_t *watchdog)
 
 		int rc = machine_wait_flag_wait(watchdog->online, poll_ms);
 		if (rc == 0) {
-			od_log(&instance->logger, "watchdog", NULL, NULL,
+			od_log(&instance->logger, NULL, NULL,
 			       "online flag is set, exiting from watchdog for %s",
 			       watchdog->storage->name);
 			break;
 		}
 
 		if (rc == -1 && machine_errno() != ETIMEDOUT) {
-			od_error(&instance->logger, "watchdog", NULL, NULL,
+			od_error(&instance->logger, NULL, NULL,
 				 "can't wait online flag: %s (%d)",
 				 strerror(machine_errno()), machine_errno());
 			break;
@@ -395,12 +432,12 @@ void od_storage_watchdog_watch(void *arg)
 	od_global_t *global = watchdog->global;
 	od_instance_t *instance = global->instance;
 
-	od_debug(&instance->logger, "watchdog", NULL, NULL,
+	od_debug(&instance->logger, NULL, NULL,
 		 "start watchdog for storage '%s'", watchdog->storage->name);
 
 	od_storage_watchdog_do_polling_loop(watchdog);
 
-	od_log(&instance->logger, "watchdog", NULL, NULL,
+	od_log(&instance->logger, NULL, NULL,
 	       "finishing watchdog for storage '%s'", watchdog->storage->name);
 
 	od_rule_storage_t *storage = watchdog->storage;
@@ -414,23 +451,20 @@ int od_storage_parse_endpoints(const char *host_str,
 			       od_storage_endpoint_t **out, size_t *count)
 {
 	od_address_t *addrs = NULL;
+	size_t c = 0;
 
-	if (od_parse_addresses(host_str, &addrs, count) != OK_RESPONSE) {
+	if (od_parse_addresses(host_str, &addrs, &c) != OK_RESPONSE) {
 		return NOT_OK_RESPONSE;
 	}
 
-	size_t c = *count;
-
 	if (c > OD_STORAGE_MAX_ENDPOINTS) {
-		od_free(addrs);
-		return NOT_OK_RESPONSE;
+		goto error;
 	}
 
 	od_storage_endpoint_t *result =
 		od_malloc(c * sizeof(od_storage_endpoint_t));
 	if (result == NULL) {
-		od_free(addrs);
-		return NOT_OK_RESPONSE;
+		goto error;
 	}
 
 	for (size_t i = 0; i < c; ++i) {
@@ -442,7 +476,14 @@ int od_storage_parse_endpoints(const char *host_str,
 	od_free(addrs);
 
 	*out = result;
-	/* count is set in od_parse_addresses */
+	*count = c;
 
 	return OK_RESPONSE;
+
+error:
+	for (size_t i = 0; i < c; ++i) {
+		od_address_destroy(&addrs[i]);
+	}
+	od_free(addrs);
+	return NOT_OK_RESPONSE;
 }

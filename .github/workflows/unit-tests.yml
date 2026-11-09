@@ -5,6 +5,8 @@ on:
   pull_request:
     branches: [ master ]
     paths:
+      - ".github/actions/test-logs/**"
+      - ".github/workflows/unit-tests.yml"
       - "sources/**"
       - "test/**"
       - "CMakeLists.txt"
@@ -12,17 +14,28 @@ on:
       - "modules/**"
       - "cmake/**"
       - "!docker/prom-exporter/**"
+      - "!test/prom-exporter/**"
       - "!sources/machinarium/gdb/**"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   unit:
     name: unit
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # s390x is built and run under qemu emulation, which is much slower
+    timeout-minutes: ${{ matrix.target-arch == 'linux/s390x' && 90 || 20 }}
     strategy:
       matrix:
         build-type: ['build_release', 'build_dbg', 'build_asan']
         target-arch: ['linux/amd64']
         cc: ['gcc', 'clang']
+        include:
+          # big-endian target without inline 128-bit CAS
+          - build-type: 'build_release'
+            target-arch: 'linux/s390x'
+            cc: 'gcc'
     steps:
     - uses: actions/checkout@v7
       with:
@@ -32,4 +45,27 @@ jobs:
     - name: docker buildx
       uses: docker/setup-buildx-action@v4
     - name: Odyssey unit tests
-      run: make ci-unittests ODYSSEY_BUILD_TYPE=${{ matrix.build-type }} ODYSSEY_TEST_TARGET_PLATFORM=${{ matrix.target-arch }} ODYSSEY_CC=${{ matrix.cc }}
+      shell: bash
+      run: make ci-unittests ODYSSEY_BUILD_TYPE=${{ matrix.build-type }} ODYSSEY_TEST_TARGET_PLATFORM=${{ matrix.target-arch }} ODYSSEY_CC=${{ matrix.cc }} 2>&1 | tee test-run.log
+    - name: Save logs on failure
+      if: failure()
+      uses: ./.github/actions/test-logs
+
+  unit-compression:
+    name: unit (compression)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v7
+      with:
+        submodules: recursive
+    - name: qemu setup
+      uses: docker/setup-qemu-action@v4
+    - name: docker buildx
+      uses: docker/setup-buildx-action@v4
+    - name: Odyssey unit tests with BUILD_COMPRESSION=ON
+      shell: bash
+      run: make ci-unittests ODYSSEY_CMAKE_EXTRA="-DBUILD_COMPRESSION=ON" 2>&1 | tee test-run.log
+    - name: Save logs on failure
+      if: failure()
+      uses: ./.github/actions/test-logs

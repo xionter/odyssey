@@ -7,509 +7,13 @@
 #include <odyssey.h>
 
 #include <od_memory.h>
+#include <duration.h>
 #include <balancing.h>
 #include <cfg/model.h>
 
 void od_cfg_model_init(od_cfg_model_t *model)
 {
 	memset(model, 0, sizeof(*model));
-}
-
-static void print_depth(FILE *file, int depth)
-{
-	for (int i = 0; i < depth; ++i) {
-		fputc('\t', file);
-	}
-}
-
-static void dump_bool(FILE *file, const char *name, int depth,
-		      const od_cfg_bool_field_t *f)
-{
-	if (f->seen.is_set) {
-		print_depth(file, depth);
-		fprintf(file, "%s %s\n", name, f->value ? "yes" : "no");
-	}
-}
-
-static void dump_string(FILE *file, const char *name, int depth,
-			const od_cfg_string_field_t *f)
-{
-	if (f->seen.is_set) {
-		print_depth(file, depth);
-		fprintf(file, "%s \"%s\"\n", name, f->value);
-	}
-}
-
-static void dump_int(FILE *file, const char *name, int depth,
-		     const od_cfg_int_field_t *f)
-{
-	if (f->seen.is_set) {
-		print_depth(file, depth);
-		fprintf(file, "%s %d\n", name, f->value);
-	}
-}
-
-static void dump_uint64(FILE *file, const char *name, int depth,
-			const od_cfg_u64_field_t *f)
-{
-	if (f->seen.is_set) {
-		print_depth(file, depth);
-		fprintf(file, "%s %llu\n", name, (unsigned long long)f->value);
-	}
-}
-
-static void dump_shared_pool(FILE *file, const od_cfg_shared_pool_t *sp)
-{
-	fprintf(file, "shared_pool \"%s\" {\n", sp->name);
-	dump_int(file, "pool_size", 1, &sp->pool_size);
-	fprintf(file, "}\n");
-}
-
-static void dump_conn_drop(FILE *file, const od_cfg_conn_drop_options_t *cd)
-{
-	if (cd->seen.is_set) {
-		fprintf(file, "conn_drop_options {\n");
-		dump_bool(file, "drop_enabled", 1, &cd->drop_enabled);
-		dump_int(file, "rate", 1, &cd->rate);
-		dump_int(file, "interval_ms", 1, &cd->interval_ms);
-		fprintf(file, "}\n");
-	}
-}
-
-static void dump_balancing(FILE *file, int indent, const od_cfg_balancing_t *b)
-{
-	if (!b->seen.is_set) {
-		return;
-	}
-
-	fprintf(file, "%*sbalancing {\n", indent, "");
-	if (b->method.seen.is_set) {
-		fprintf(file, "%*smethod \"%s\" {\n", indent + 1, "",
-			b->method.name);
-		dump_bool(file, "az_aware", indent + 2, &b->method.az_aware);
-		fprintf(file, "%*s}\n", indent + 1, "");
-	}
-	dump_bool(file, "show_notice_messages", indent + 1,
-		  &b->show_notice_messages);
-	fprintf(file, "%*s}\n", indent, "");
-}
-
-static void dump_listen(FILE *file, const od_cfg_listen_t *l)
-{
-	fprintf(file, "listen {\n");
-	dump_string(file, "host", 1, &l->host);
-	dump_int(file, "port", 1, &l->port);
-	dump_string(file, "target_session_attrs", 1, &l->target_session_attrs);
-	dump_bool(file, "auto_route_ro_on_standby", 1,
-		  &l->auto_route_ro_on_standby);
-	dump_balancing(file, 1, &l->balancing);
-	dump_int(file, "client_login_timeout", 1, &l->client_login_timeout);
-	dump_int(file, "reserved_clients", 1, &l->reserved_clients);
-	dump_int(file, "backlog", 1, &l->backlog);
-	dump_string(file, "tls", 1, &l->tls);
-	dump_string(file, "tls_ca_file", 1, &l->tls_ca_file);
-	dump_string(file, "tls_key_file", 1, &l->tls_key_file);
-	dump_string(file, "tls_cert_file", 1, &l->tls_cert_file);
-	dump_string(file, "tls_protocols", 1, &l->tls_protocols);
-	dump_int(file, "catchup_timeout", 1, &l->catchup_timeout);
-	fprintf(file, "}\n");
-}
-
-static void dump_user(FILE *file, const char *type, const od_cfg_route_t *user);
-
-static void dump_storage(FILE *file, const od_cfg_storage_t *s)
-{
-	fprintf(file, "storage \"%s\" {\n", s->name);
-
-	dump_string(file, "type", 1, &s->type);
-	dump_string(file, "host", 1, &s->host);
-	dump_int(file, "port", 1, &s->port);
-	dump_string(file, "tls", 1, &s->tls);
-	dump_string(file, "tls_ca_file", 1, &s->tls_ca_file);
-	dump_string(file, "tls_key_file", 1, &s->tls_key_file);
-	dump_string(file, "tls_cert_file", 1, &s->tls_cert_file);
-	dump_string(file, "tls_protocols", 1, &s->tls_protocols);
-	dump_int(file, "server_max_routing", 1, &s->server_max_routing);
-	dump_int(file, "endpoints_status_poll_interval_ms", 1,
-		 &s->endpoints_status_poll_interval_ms);
-
-	dump_balancing(file, 1, &s->balancing);
-
-	if (s->watchdog != NULL) {
-		dump_user(file, "watchdog", s->watchdog);
-	}
-
-	fprintf(file, "}\n");
-}
-
-static void dump_soft_oom(FILE *file, const od_cfg_soft_oom_t *s)
-{
-	if (!s->seen.is_set) {
-		return;
-	}
-
-	fprintf(file, "soft_oom {\n");
-	dump_uint64(file, "limit", 1, &s->limit);
-	dump_string(file, "process", 1, &s->process);
-	dump_int(file, "check_interval_ms", 1, &s->check_interval_ms);
-	if (s->drop.seen.is_set) {
-		fprintf(file, "\tdrop {\n");
-		dump_string(file, "signal", 2, &s->drop.signal);
-		dump_int(file, "max_rate", 2, &s->drop.max_rate);
-		fprintf(file, "\t}\n");
-	}
-	fprintf(file, "}\n");
-}
-
-static void dump_ldap_endpoint(FILE *file, const od_cfg_ldap_endpoint_t *e)
-{
-	fprintf(file, "ldap_endpoint \"%s\" {\n", e->name);
-
-	dump_string(file, "ldapserver", 1, &e->ldapserver);
-	dump_uint64(file, "ldapport", 1, &e->ldapport);
-	dump_string(file, "ldapprefix", 1, &e->ldapprefix);
-	dump_string(file, "ldapsuffix", 1, &e->ldapsuffix);
-	dump_string(file, "ldapsearchattribute", 1, &e->ldapsearchattribute);
-	dump_string(file, "ldapscope", 1, &e->ldapscope);
-	dump_string(file, "ldapscheme", 1, &e->ldapscheme);
-	dump_string(file, "ldapbasedn", 1, &e->ldapbasedn);
-	dump_string(file, "ldapbinddn", 1, &e->ldapbinddn);
-	dump_string(file, "ldapbindpasswd", 1, &e->ldapbindpasswd);
-	dump_string(file, "ldapsearchfilter", 1, &e->ldapsearchfilter);
-
-	fprintf(file, "}\n");
-}
-
-static void dump_string_kvp_list(FILE *file, const char *name, int depth,
-				 const od_cfg_string_kvp_list_t *list)
-{
-	if (!list->seen.is_set || list->pairs_count == 0) {
-		return;
-	}
-
-	print_depth(file, depth);
-	fprintf(file, "%s {\n", name);
-	for (size_t i = 0; i < list->pairs_count; ++i) {
-		print_depth(file, depth + 1);
-		fprintf(file, "\"%s\" \"%s\"\n", list->pairs[i]->key,
-			list->pairs[i]->value);
-	}
-	print_depth(file, depth);
-	fprintf(file, "}\n");
-}
-
-static void
-dump_ldap_storage_credentials(FILE *file, int depth,
-			      const od_cfg_ldap_storage_credentials_t *lsc)
-{
-	print_depth(file, depth);
-	fprintf(file, "ldap_storage_credentials \"%s\" {\n", lsc->name);
-	dump_string(file, "ldap_storage_username", depth + 1,
-		    &lsc->ldap_storage_username);
-	dump_string(file, "ldap_storage_password", depth + 1,
-		    &lsc->ldap_storage_password);
-	print_depth(file, depth);
-	fprintf(file, "}\n");
-}
-
-static void dump_user(FILE *file, const char *type, const od_cfg_route_t *user)
-{
-	if (user->is_default) {
-		fprintf(file, "\t%s default ", type);
-	} else {
-		if (user->name != NULL) {
-			fprintf(file, "\t%s \"%s\" ", type, user->name);
-		} else {
-			fprintf(file, "\t%s ", type);
-		}
-	}
-
-	if (user->address_range != NULL) {
-		fprintf(file, "\"%s\" ", user->address_range);
-	}
-
-	if (user->conn_type != OD_CFG_CONN_TYPE_DEFAULT) {
-		switch (user->conn_type) {
-		case OD_CFG_CONN_TYPE_LOCAL:
-			fprintf(file, "local ");
-			break;
-		case OD_CFG_CONN_TYPE_HOST:
-			fprintf(file, "host ");
-			break;
-		case OD_CFG_CONN_TYPE_HOSTSSL:
-			fprintf(file, "hostssl ");
-			break;
-		case OD_CFG_CONN_TYPE_HOSTNOSSL:
-			fprintf(file, "hostnossl ");
-			break;
-		default:
-			abort();
-		}
-	}
-
-	fprintf(file, "{\n");
-
-	for (size_t i = 0; i < user->auth_common_names_count; ++i) {
-		print_depth(file, 2);
-		if (user->auth_common_names[i]->is_default) {
-			fprintf(file, "auth_common_name default\n");
-		} else {
-			fprintf(file, "auth_common_name \"%s\"\n",
-				user->auth_common_names[i]->name);
-		}
-	}
-
-	dump_string(file, "authentication", 2, &user->authentication);
-	dump_string(file, "auth_module", 2, &user->auth_module);
-	dump_bool(file, "enable_mdb_iamproxy_auth", 2,
-		  &user->enable_mdb_iamproxy_auth);
-	dump_string(file, "mdb_iamproxy_socket_path", 2,
-		    &user->mdb_iamproxy_socket_path);
-	dump_string(file, "auth_pam_service", 2, &user->auth_pam_service);
-	dump_string(file, "target_session_attrs", 2,
-		    &user->target_session_attrs);
-	dump_bool(file, "auto_route_ro_on_standby", 2,
-		  &user->auto_route_ro_on_standby);
-	dump_string(file, "auth_query", 2, &user->auth_query);
-	dump_string(file, "auth_query_db", 2, &user->auth_query_db);
-	dump_string(file, "auth_query_user", 2, &user->auth_query_user);
-	dump_bool(file, "password_passthrough", 2, &user->password_passthrough);
-	dump_string(file, "password", 2, &user->password);
-	dump_string(file, "role", 2, &user->role);
-
-	dump_int(file, "client_max", 2, &user->client_max);
-	dump_bool(file, "client_fwd_error", 2, &user->client_fwd_error);
-	dump_bool(file, "client_show_id", 2, &user->client_show_id);
-	dump_bool(file, "reserve_session_server_connection", 2,
-		  &user->reserve_session_server_connection);
-	dump_string(file, "quantiles", 2, &user->quantiles);
-	dump_bool(file, "application_name_add_host", 2,
-		  &user->application_name_add_host);
-	dump_bool(file, "server_drop_on_backend_plan_error", 2,
-		  &user->server_drop_on_backend_plan_error);
-	dump_bool(file, "server_drop_on_oom", 2, &user->server_drop_on_oom);
-	dump_uint64(file, "server_lifetime", 2, &user->server_lifetime);
-
-	if (user->ldap_pool_size.seen.is_set) {
-		print_depth(file, 2);
-		fprintf(file, "# deprecated: ldap_pool_size %d\n",
-			user->ldap_pool_size.value);
-	}
-	if (user->ldap_pool_timeout.seen.is_set) {
-		print_depth(file, 2);
-		fprintf(file, "# deprecated: ldap_pool_timeout %d\n",
-			user->ldap_pool_timeout.value);
-	}
-	if (user->ldap_pool_ttl.seen.is_set) {
-		print_depth(file, 2);
-		fprintf(file, "# deprecated: ldap_pool_ttl %d\n",
-			user->ldap_pool_ttl.value);
-	}
-
-	dump_bool(file, "maintain_params", 2, &user->maintain_params);
-
-	dump_string(file, "pool", 2, &user->pool);
-	dump_string(file, "pool_routing", 2, &user->pool_routing);
-	dump_int(file, "min_pool_size", 2, &user->min_pool_size);
-	dump_int(file, "pool_size", 2, &user->pool_size);
-	dump_int(file, "pool_timeout", 2, &user->pool_timeout);
-	dump_int(file, "pool_ttl", 2, &user->pool_ttl);
-	dump_bool(file, "pool_discard", 2, &user->pool_discard);
-	dump_bool(file, "pool_smart_discard", 2, &user->pool_smart_discard);
-	dump_string(file, "pool_discard_query", 2, &user->pool_discard_query);
-	dump_bool(file, "pool_cancel", 2, &user->pool_cancel);
-	dump_bool(file, "pool_rollback", 2, &user->pool_rollback);
-	dump_uint64(file, "pool_reset_timeout_ms", 2,
-		    &user->pool_reset_timeout_ms);
-	dump_bool(file, "pool_reserve_prepared_statement", 2,
-		  &user->pool_reserve_prepared_statement);
-	dump_int(file, "server_pstmt_cache_size", 2,
-		 &user->server_pstmt_cache_size);
-	dump_bool(file, "pool_pin_on_listen", 2, &user->pool_pin_on_listen);
-	dump_bool(file, "pool_attach_check", 2, &user->pool_attach_check);
-	dump_bool(file, "pool_acquire_fail_fast", 2,
-		  &user->pool_acquire_fail_fast);
-	dump_uint64(file, "pool_notice_after_waiting_ms", 2,
-		    &user->pool_notice_after_waiting_ms);
-	dump_uint64(file, "pool_client_idle_timeout", 2,
-		    &user->pool_client_idle_timeout);
-	dump_uint64(file, "pool_idle_in_transaction_timeout", 2,
-		    &user->pool_idle_in_transaction_timeout);
-
-	dump_string(file, "shared_pool", 2, &user->shared_pool);
-	dump_string(file, "storage", 2, &user->storage);
-	dump_string(file, "storage_user", 2, &user->storage_user);
-	dump_string(file, "storage_password", 2, &user->storage_password);
-	dump_string(file, "storage_database", 2, &user->storage_database);
-	dump_bool(file, "log_debug", 2, &user->log_debug);
-	dump_bool(file, "log_query", 2, &user->log_query);
-	dump_string(file, "ldap_endpoint_name", 2, &user->ldap_endpoint_name);
-	dump_string(file, "ldap_storage_credentials_attr", 2,
-		    &user->ldap_storage_credentials_attr);
-	for (size_t i = 0; i < user->ldap_storage_credentials_count; ++i) {
-		dump_ldap_storage_credentials(
-			file, 2, user->ldap_storage_credentials[i]);
-	}
-
-	dump_string(file, "watchdog_lag_query", 2, &user->watchdog_lag_query);
-	dump_int(file, "watchdog_lag_interval", 2,
-		 &user->watchdog_lag_interval);
-	dump_int(file, "catchup_timeout", 2, &user->catchup_timeout);
-
-	dump_string_kvp_list(file, "pgoptions", 2, &user->pgoptions);
-	dump_string_kvp_list(file, "backend_startup_options", 2,
-			     &user->backend_startup_options);
-
-	dump_string(file, "group_query", 2, &user->group_query);
-	dump_string(file, "group_query_user", 2, &user->group_query_user);
-	dump_string(file, "group_query_db", 2, &user->group_query_db);
-
-	dump_int(file, "keepalive", 2, &user->keepalive);
-	dump_int(file, "keepalive_keep_interval", 2,
-		 &user->keepalive_keep_interval);
-	dump_int(file, "keepalive_probes", 2, &user->keepalive_probes);
-	dump_int(file, "keepalive_usr_timeout", 2,
-		 &user->keepalive_usr_timeout);
-
-	fprintf(file, "\t}\n");
-}
-
-static void dump_database(FILE *file, const od_cfg_database_t *db)
-{
-	if (db->is_default) {
-		fprintf(file, "database default {\n");
-	} else {
-		fprintf(file, "database \"%s\" {\n", db->name);
-	}
-
-	for (size_t i = 0; i < db->users_count; ++i) {
-		dump_user(file, "user", db->users[i]);
-	}
-
-	for (size_t i = 0; i < db->groups_count; ++i) {
-		dump_user(file, "group", db->groups[i]);
-	}
-
-	fprintf(file, "}\n");
-}
-
-void od_cfg_model_dumpf(FILE *file, const od_cfg_model_t *model)
-{
-	dump_bool(file, "daemonize", 0, &model->global.daemonize);
-	dump_bool(file, "sequential_routing", 0,
-		  &model->global.sequential_routing);
-	dump_bool(file, "enable_online_restart", 0,
-		  &model->global.enable_online_restart);
-	dump_bool(file, "virtual_processing", 0,
-		  &model->global.virtual_processing);
-	dump_bool(file, "bindwith_reuseport", 0,
-		  &model->global.bindwith_reuseport);
-	dump_bool(file, "enable_host_watcher", 0,
-		  &model->global.enable_host_watcher);
-	dump_bool(file, "log_debug", 0, &model->global.log_debug);
-	dump_bool(file, "log_to_stdout", 0, &model->global.log_to_stdout);
-	dump_bool(file, "log_config", 0, &model->global.log_config);
-	dump_bool(file, "log_session", 0, &model->global.log_session);
-	dump_bool(file, "log_query", 0, &model->global.log_query);
-	dump_bool(file, "log_stats", 0, &model->global.log_stats);
-	dump_bool(file, "log_async", 0, &model->global.log_async);
-	dump_bool(file, "log_syslog", 0, &model->global.log_syslog);
-	dump_bool(file, "log_general_stats_prom", 0,
-		  &model->global.log_general_stats_prom);
-	dump_bool(file, "log_route_stats_prom", 0,
-		  &model->global.log_route_stats_prom);
-	dump_bool(file, "smart_search_path_enquoting", 0,
-		  &model->global.smart_search_path_enquoting);
-	dump_bool(file, "nodelay", 0, &model->global.nodelay);
-	dump_bool(file, "disable_nolinger", 0, &model->global.disable_nolinger);
-
-	dump_string(file, "pid_file", 0, &model->global.pid_file);
-	dump_string(file, "unix_socket_dir", 0, &model->global.unix_socket_dir);
-	dump_string(file, "unix_socket_mode", 0,
-		    &model->global.unix_socket_mode);
-	dump_string(file, "locks_dir", 0, &model->global.locks_dir);
-	dump_string(file, "external_auth_socket_path", 0,
-		    &model->global.external_auth_socket_path);
-	dump_string(file, "availability_zone", 0,
-		    &model->global.availability_zone);
-	dump_string(file, "log_file", 0, &model->global.log_file);
-	dump_string(file, "log_format", 0, &model->global.log_format);
-	dump_string(file, "log_syslog_ident", 0,
-		    &model->global.log_syslog_ident);
-	dump_string(file, "log_syslog_facility", 0,
-		    &model->global.log_syslog_facility);
-	dump_string(file, "cpu_affinity", 0, &model->global.cpu_affinity);
-	dump_string(file, "hba_file", 0, &model->global.hba_file);
-
-	dump_int(file, "priority", 0, &model->global.priority);
-	dump_int(file, "graceful_shutdown_timeout_ms", 0,
-		 &model->global.graceful_shutdown_timeout_ms);
-	dump_int(file, "log_queue_depth", 0, &model->global.log_queue_depth);
-	dump_int(file, "stats_interval", 0, &model->global.stats_interval);
-	dump_int(file, "client_max", 0, &model->global.client_max);
-	dump_int(file, "client_max_routing", 0,
-		 &model->global.client_max_routing);
-	dump_int(file, "server_login_retry", 0,
-		 &model->global.server_login_retry);
-	dump_int(file, "readahead", 0, &model->global.readahead);
-	dump_int(file, "keepalive", 0, &model->global.keepalive);
-	dump_int(file, "keepalive_keep_interval", 0,
-		 &model->global.keepalive_keep_interval);
-	dump_int(file, "keepalive_probes", 0, &model->global.keepalive_probes);
-	dump_int(file, "keepalive_usr_timeout", 0,
-		 &model->global.keepalive_usr_timeout);
-	dump_int(file, "max_sigterms_to_die", 0,
-		 &model->global.max_sigterms_to_die);
-	dump_int(file, "backend_connect_timeout_ms", 0,
-		 &model->global.backend_connect_timeout_ms);
-	dump_int(file, "cancel_timeout_ms", 0,
-		 &model->global.cancel_timeout_ms);
-	dump_int(file, "cancel_queue_timeout_ms", 0,
-		 &model->global.cancel_queue_timeout_ms);
-	dump_int(file, "cancel_max_inflight", 0,
-		 &model->global.cancel_max_inflight);
-	dump_int(file, "cancel_rate_limit", 0,
-		 &model->global.cancel_rate_limit);
-	dump_int(file, "resolvers", 0, &model->global.resolvers);
-	dump_int(file, "dns_cache_ttl", 0, &model->global.dns_cache_ttl);
-	dump_int(file, "cache_msg_gc_size", 0,
-		 &model->global.cache_msg_gc_size);
-	dump_int(file, "cache_msg_gc_count", 0,
-		 &model->global.cache_msg_gc_count);
-	dump_int(file, "cache_coroutine", 0, &model->global.cache_coroutine);
-	dump_int(file, "coroutine_stack_size", 0,
-		 &model->global.coroutine_stack_size);
-	dump_int(file, "system_coroutine_stack_size", 0,
-		 &model->global.system_coroutine_stack_size);
-	dump_int(file, "promhttp_server_port", 0,
-		 &model->global.promhttp_server_port);
-	dump_int(file, "group_checker_interval", 0,
-		 &model->global.group_checker_interval);
-	dump_int(file, "workers", 0, &model->global.workers);
-
-	for (size_t i = 0; i < model->listens_count; ++i) {
-		dump_listen(file, model->listens[i]);
-	}
-
-	for (size_t i = 0; i < model->storages_count; ++i) {
-		dump_storage(file, model->storages[i]);
-	}
-
-	for (size_t i = 0; i < model->databases_count; ++i) {
-		dump_database(file, model->databases[i]);
-	}
-
-	for (size_t i = 0; i < model->shared_pools_count; ++i) {
-		dump_shared_pool(file, model->shared_pools[i]);
-	}
-
-	for (size_t i = 0; i < model->ldap_endpoints_count; ++i) {
-		dump_ldap_endpoint(file, model->ldap_endpoints[i]);
-	}
-
-	dump_conn_drop(file, &model->conn_drop_options);
-
-	dump_soft_oom(file, &model->soft_oom);
 }
 
 static void od_cfg_string_field_free(od_cfg_string_field_t *field)
@@ -540,6 +44,11 @@ static void od_cfg_u64_field_free(od_cfg_u64_field_t *field)
 	od_cfg_seen_free(&field->seen);
 }
 
+static void od_cfg_i64_field_free(od_cfg_i64_field_t *field)
+{
+	od_cfg_seen_free(&field->seen);
+}
+
 void od_cfg_seen_set(od_cfg_seen_t *seen, od_cfg_location_t location)
 {
 	seen->is_set = 1;
@@ -549,12 +58,6 @@ void od_cfg_seen_set(od_cfg_seen_t *seen, od_cfg_location_t location)
 void od_cfg_seen_free(od_cfg_seen_t *seen)
 {
 	od_cfg_location_free(&seen->location);
-}
-
-void od_cfg_seen_reset(od_cfg_seen_t *seen)
-{
-	od_cfg_location_free(&seen->location);
-	seen->is_set = 0;
 }
 
 od_cfg_listen_storage_t *od_cfg_listen_add_storage(od_cfg_listen_t *listen,
@@ -616,14 +119,15 @@ static void od_cfg_listen_free(od_cfg_listen_t *listen)
 	od_cfg_string_field_free(&listen->target_session_attrs);
 	od_cfg_bool_field_free(&listen->auto_route_ro_on_standby);
 	od_cfg_balancing_free(&listen->balancing);
-	od_cfg_int_field_free(&listen->client_login_timeout);
+	od_cfg_u64_field_free(&listen->client_login_timeout_ms);
+	od_cfg_bool_field_free(&listen->compression);
 	od_cfg_int_field_free(&listen->backlog);
 	od_cfg_string_field_free(&listen->tls);
 	od_cfg_string_field_free(&listen->tls_ca_file);
 	od_cfg_string_field_free(&listen->tls_key_file);
 	od_cfg_string_field_free(&listen->tls_cert_file);
 	od_cfg_string_field_free(&listen->tls_protocols);
-	od_cfg_int_field_free(&listen->catchup_timeout);
+	od_cfg_u64_field_free(&listen->catchup_timeout_ms);
 	od_cfg_int_field_free(&listen->reserved_clients);
 
 	for (size_t i = 0; i < listen->storages_count; ++i) {
@@ -661,7 +165,7 @@ static void od_cfg_storage_free(od_cfg_storage_t *storage)
 	od_cfg_string_field_free(&storage->tls_cert_file);
 	od_cfg_string_field_free(&storage->tls_protocols);
 	od_cfg_int_field_free(&storage->server_max_routing);
-	od_cfg_int_field_free(&storage->endpoints_status_poll_interval_ms);
+	od_cfg_u64_field_free(&storage->endpoints_status_poll_interval_ms);
 
 	od_cfg_balancing_free(&storage->balancing);
 
@@ -781,7 +285,7 @@ static void od_cfg_user_route_free(od_cfg_route_t *user)
 	od_cfg_bool_field_free(&user->application_name_add_host);
 	od_cfg_bool_field_free(&user->server_drop_on_backend_plan_error);
 	od_cfg_bool_field_free(&user->server_drop_on_oom);
-	od_cfg_u64_field_free(&user->server_lifetime);
+	od_cfg_u64_field_free(&user->server_lifetime_ms);
 	od_cfg_int_field_free(&user->ldap_pool_size);
 	od_cfg_int_field_free(&user->ldap_pool_timeout);
 	od_cfg_int_field_free(&user->ldap_pool_ttl);
@@ -790,8 +294,8 @@ static void od_cfg_user_route_free(od_cfg_route_t *user)
 	od_cfg_string_field_free(&user->pool_routing);
 	od_cfg_int_field_free(&user->min_pool_size);
 	od_cfg_int_field_free(&user->pool_size);
-	od_cfg_int_field_free(&user->pool_timeout);
-	od_cfg_int_field_free(&user->pool_ttl);
+	od_cfg_u64_field_free(&user->pool_timeout_ms);
+	od_cfg_u64_field_free(&user->pool_ttl_ms);
 	od_cfg_bool_field_free(&user->pool_discard);
 	od_cfg_bool_field_free(&user->pool_smart_discard);
 	od_cfg_string_field_free(&user->pool_discard_query);
@@ -803,28 +307,30 @@ static void od_cfg_user_route_free(od_cfg_route_t *user)
 	od_cfg_bool_field_free(&user->pool_pin_on_listen);
 	od_cfg_bool_field_free(&user->pool_attach_check);
 	od_cfg_bool_field_free(&user->pool_acquire_fail_fast);
-	od_cfg_u64_field_free(&user->pool_notice_after_waiting_ms);
-	od_cfg_u64_field_free(&user->pool_client_idle_timeout);
-	od_cfg_u64_field_free(&user->pool_idle_in_transaction_timeout);
+	od_cfg_i64_field_free(&user->pool_notice_after_waiting_ms);
+	od_cfg_u64_field_free(&user->pool_client_idle_timeout_ms);
+	od_cfg_u64_field_free(&user->pool_idle_in_transaction_timeout_ms);
 	od_cfg_string_field_free(&user->shared_pool);
 	od_cfg_string_field_free(&user->storage);
 	od_cfg_string_field_free(&user->storage_database);
 	od_cfg_string_field_free(&user->storage_user);
 	od_cfg_string_field_free(&user->storage_password);
 	od_cfg_bool_field_free(&user->log_debug);
+	od_cfg_int_field_free(&user->log_debug_sampling);
 	od_cfg_bool_field_free(&user->log_query);
+	od_cfg_int_field_free(&user->log_query_sampling);
 	od_cfg_string_field_free(&user->ldap_endpoint_name);
 	od_cfg_string_field_free(&user->ldap_storage_credentials_attr);
 	od_cfg_string_field_free(&user->watchdog_lag_query);
-	od_cfg_int_field_free(&user->watchdog_lag_interval);
-	od_cfg_int_field_free(&user->catchup_timeout);
+	od_cfg_u64_field_free(&user->watchdog_lag_interval_ms);
+	od_cfg_u64_field_free(&user->catchup_timeout_ms);
 	od_cfg_string_field_free(&user->group_query);
 	od_cfg_string_field_free(&user->group_query_user);
 	od_cfg_string_field_free(&user->group_query_db);
-	od_cfg_int_field_free(&user->keepalive);
-	od_cfg_int_field_free(&user->keepalive_keep_interval);
+	od_cfg_u64_field_free(&user->keepalive_ms);
+	od_cfg_u64_field_free(&user->keepalive_keep_interval_ms);
 	od_cfg_int_field_free(&user->keepalive_probes);
-	od_cfg_int_field_free(&user->keepalive_usr_timeout);
+	od_cfg_i64_field_free(&user->keepalive_usr_timeout_ms);
 
 	od_cfg_seen_free(&user->pgoptions.seen);
 	od_cfg_location_free(&user->pgoptions.location);
@@ -876,10 +382,13 @@ void od_cfg_global_free(od_cfg_global_t *g)
 	od_cfg_bool_field_free(&g->bindwith_reuseport);
 	od_cfg_bool_field_free(&g->enable_host_watcher);
 	od_cfg_bool_field_free(&g->log_debug);
+	od_cfg_int_field_free(&g->log_debug_sampling);
+	od_cfg_bool_field_free(&g->maintain_params);
 	od_cfg_bool_field_free(&g->log_to_stdout);
 	od_cfg_bool_field_free(&g->log_config);
 	od_cfg_bool_field_free(&g->log_session);
 	od_cfg_bool_field_free(&g->log_query);
+	od_cfg_int_field_free(&g->log_query_sampling);
 	od_cfg_bool_field_free(&g->log_stats);
 	od_cfg_bool_field_free(&g->log_async);
 	od_cfg_bool_field_free(&g->log_syslog);
@@ -888,6 +397,9 @@ void od_cfg_global_free(od_cfg_global_t *g)
 	od_cfg_bool_field_free(&g->disable_nolinger);
 	od_cfg_bool_field_free(&g->log_general_stats_prom);
 	od_cfg_bool_field_free(&g->log_route_stats_prom);
+	od_cfg_bool_field_free(&g->replication_proxy_phys);
+	od_cfg_bool_field_free(&g->replication_proxy_logic);
+	od_cfg_bool_field_free(&g->ignore_cancel);
 
 	/* global string fields */
 	od_cfg_string_field_free(&g->pid_file);
@@ -902,37 +414,44 @@ void od_cfg_global_free(od_cfg_global_t *g)
 	od_cfg_string_field_free(&g->log_syslog_facility);
 	od_cfg_string_field_free(&g->cpu_affinity);
 	od_cfg_string_field_free(&g->hba_file);
+	od_cfg_string_field_free(&g->default_pool);
 
 	/* global int fields */
 	od_cfg_int_field_free(&g->priority);
-	od_cfg_int_field_free(&g->graceful_shutdown_timeout_ms);
+	od_cfg_u64_field_free(&g->graceful_shutdown_timeout_ms);
 	od_cfg_int_field_free(&g->log_queue_depth);
-	od_cfg_int_field_free(&g->stats_interval);
+	od_cfg_u64_field_free(&g->stats_interval_ms);
 	od_cfg_int_field_free(&g->client_max);
 	od_cfg_int_field_free(&g->client_max_routing);
 	od_cfg_int_field_free(&g->accept_rate_limit);
-	od_cfg_int_field_free(&g->server_login_retry);
+	od_cfg_u64_field_free(&g->server_login_retry_ms);
 	od_cfg_int_field_free(&g->readahead);
-	od_cfg_int_field_free(&g->keepalive);
-	od_cfg_int_field_free(&g->keepalive_keep_interval);
+	od_cfg_u64_field_free(&g->keepalive_ms);
+	od_cfg_u64_field_free(&g->keepalive_keep_interval_ms);
 	od_cfg_int_field_free(&g->keepalive_probes);
-	od_cfg_int_field_free(&g->keepalive_usr_timeout);
+	od_cfg_i64_field_free(&g->keepalive_usr_timeout_ms);
 	od_cfg_int_field_free(&g->max_sigterms_to_die);
-	od_cfg_int_field_free(&g->backend_connect_timeout_ms);
-	od_cfg_int_field_free(&g->cancel_timeout_ms);
-	od_cfg_int_field_free(&g->cancel_queue_timeout_ms);
+	od_cfg_u64_field_free(&g->backend_connect_timeout_ms);
+	od_cfg_u64_field_free(&g->cancel_timeout_ms);
+	od_cfg_i64_field_free(&g->cancel_queue_timeout_ms);
 	od_cfg_int_field_free(&g->cancel_max_inflight);
 	od_cfg_int_field_free(&g->cancel_rate_limit);
 	od_cfg_int_field_free(&g->resolvers);
-	od_cfg_int_field_free(&g->dns_cache_ttl);
+	od_cfg_u64_field_free(&g->dns_cache_ttl_ms);
 	od_cfg_int_field_free(&g->cache_msg_gc_size);
 	od_cfg_int_field_free(&g->cache_msg_gc_count);
 	od_cfg_int_field_free(&g->cache_coroutine);
 	od_cfg_int_field_free(&g->coroutine_stack_size);
 	od_cfg_int_field_free(&g->system_coroutine_stack_size);
 	od_cfg_int_field_free(&g->promhttp_server_port);
-	od_cfg_int_field_free(&g->group_checker_interval);
+	od_cfg_u64_field_free(&g->group_checker_interval_ms);
 	od_cfg_int_field_free(&g->workers);
+
+	od_cfg_u64_field_free(&g->auth_query_cache_ttl_ms);
+	od_cfg_u64_field_free(&g->auth_query_cache_ttl_jitter_ms);
+	od_cfg_u64_field_free(&g->auth_query_cache_error_retry_ms);
+	od_cfg_bool_field_free(&g->auth_query_cache_stale_on_error);
+	od_cfg_u64_field_free(&g->auth_query_timeout_ms);
 
 	memset(g, 0, sizeof(*g));
 }
@@ -945,22 +464,18 @@ void od_cfg_model_free(od_cfg_model_t *model)
 	od_cfg_location_free(&model->conn_drop_options.location);
 	od_cfg_bool_field_free(&model->conn_drop_options.drop_enabled);
 	od_cfg_int_field_free(&model->conn_drop_options.rate);
-	od_cfg_int_field_free(&model->conn_drop_options.interval_ms);
+	od_cfg_u64_field_free(&model->conn_drop_options.interval_ms);
 
-	od_cfg_seen_free(&model->soft_oom.seen);
-	od_cfg_location_free(&model->soft_oom.location);
 	od_cfg_u64_field_free(&model->soft_oom.limit);
 	od_cfg_string_field_free(&model->soft_oom.process);
-	od_cfg_int_field_free(&model->soft_oom.check_interval_ms);
-	od_cfg_seen_free(&model->soft_oom.drop.seen);
-	od_cfg_location_free(&model->soft_oom.drop.location);
+	od_cfg_u64_field_free(&model->soft_oom.check_interval_ms);
 	od_cfg_string_field_free(&model->soft_oom.drop.signal);
 	od_cfg_int_field_free(&model->soft_oom.drop.max_rate);
 
 	od_cfg_query_parsing_mode_free(&model->query_parsing.mode);
 	od_cfg_u64_field_free(&model->query_parsing.mem_limit);
 	od_cfg_u64_field_free(&model->query_parsing.max_query_len);
-	od_cfg_seen_free(&model->query_parsing.seen);
+	od_cfg_string_list_free(&model->query_parsing.standby_function_list);
 
 	for (size_t i = 0; i < model->databases_count; ++i) {
 		od_cfg_database_free(model->databases[i]);
@@ -1431,6 +946,143 @@ int od_cfg_set_u64(od_cfg_diag_list_t *diags, od_cfg_u64_field_t *field,
 	return 0;
 }
 
+static int od_cfg_set_i64(od_cfg_diag_list_t *diags, od_cfg_i64_field_t *field,
+			  int64_t value, od_cfg_location_t location,
+			  const char *field_name)
+{
+	if (od_cfg_check_duplicate(diags, &field->seen, location, field_name) !=
+	    0) {
+		return -1;
+	}
+
+	field->value = value;
+	od_cfg_seen_set(&field->seen, location);
+	return 0;
+}
+
+/*
+ * Convert a parsed time value to whole milliseconds.
+ *
+ * Values with an explicit PostgreSQL-style unit ("500ms", "30 min") arrive
+ * already converted and rounded by od_duration_parse_ms().  Bare values
+ * are scaled by bare_unit_ms — the historic base unit of the option (the
+ * same idea as a PostgreSQL per-GUC base unit) — and fractional values are
+ * rounded half-to-even with rint(), like PostgreSQL rounds a GUC value.
+ */
+static int od_cfg_time_value_to_ms(od_cfg_diag_list_t *diags,
+				   od_cfg_location_t location,
+				   const char *field_name,
+				   const od_cfg_time_value_t *value,
+				   int64_t bare_unit_ms, int64_t *out_ms)
+{
+	if (bare_unit_ms <= 0) {
+		od_cfg_diag_error(
+			diags, location,
+			"internal error: invalid bare unit for option '%s'",
+			field_name);
+		return -1;
+	}
+
+	if (value->has_unit) {
+		*out_ms = value->ms;
+		return 0;
+	}
+
+	if (value->is_real) {
+		double ms = value->real * (double)bare_unit_ms;
+
+		if (!(ms >= (double)INT64_MIN && ms < (double)INT64_MAX)) {
+			od_cfg_diag_error(diags, location,
+					  "value for option '%s' is too large",
+					  field_name);
+			return -1;
+		}
+
+		*out_ms = (int64_t)rint(ms);
+		return 0;
+	}
+
+	int64_t ms;
+	if (__builtin_mul_overflow(value->bare, bare_unit_ms, &ms)) {
+		od_cfg_diag_error(diags, location,
+				  "value for option '%s' is too large",
+				  field_name);
+		return -1;
+	}
+
+	*out_ms = ms;
+	return 0;
+}
+
+static int od_cfg_check_time_range(od_cfg_diag_list_t *diags,
+				   od_cfg_location_t location,
+				   const char *field_name, int64_t ms,
+				   int64_t min_ms, int64_t max_ms)
+{
+	if (min_ms > max_ms) {
+		od_cfg_diag_error(
+			diags, location,
+			"internal error: invalid range for option '%s'",
+			field_name);
+		return -1;
+	}
+
+	if (ms < min_ms || ms > max_ms) {
+		od_cfg_diag_error(
+			diags, location,
+			"value for option '%s' must be between %lld and %lld ms",
+			field_name, (long long)min_ms, (long long)max_ms);
+		return -1;
+	}
+
+	return 0;
+}
+
+int od_cfg_set_time_u64_ms(od_cfg_diag_list_t *diags, od_cfg_u64_field_t *field,
+			   const od_cfg_time_value_t *value,
+			   int64_t bare_unit_ms, int64_t min_ms, int64_t max_ms,
+			   od_cfg_location_t location, const char *field_name)
+{
+	if (value->bare < 0) {
+		od_cfg_diag_error(diags, location,
+				  "value for option '%s' must be non-negative",
+				  field_name);
+		return -1;
+	}
+
+	int64_t ms;
+	if (od_cfg_time_value_to_ms(diags, location, field_name, value,
+				    bare_unit_ms, &ms) != 0) {
+		return -1;
+	}
+
+	if (od_cfg_check_time_range(diags, location, field_name, ms, min_ms,
+				    max_ms) != 0) {
+		return -1;
+	}
+
+	return od_cfg_set_u64(diags, field, (uint64_t)ms, location, field_name);
+}
+
+int od_cfg_set_time_i64_ms(od_cfg_diag_list_t *diags, od_cfg_i64_field_t *field,
+			   const od_cfg_time_value_t *value,
+			   int64_t bare_unit_ms, int64_t min_ms, int64_t max_ms,
+			   od_cfg_location_t location, const char *field_name)
+{
+	int64_t ms;
+	if (od_cfg_time_value_to_ms(diags, location, field_name, value,
+				    bare_unit_ms, &ms) != 0) {
+		return -1;
+	}
+
+	if (od_cfg_check_time_range(diags, location, field_name, ms, min_ms,
+				    max_ms) != 0) {
+		return -1;
+	}
+
+	return od_cfg_set_i64(diags, field, ms, location, field_name);
+}
+
 static int od_cfg_validate_shared_pools(od_cfg_model_t *model,
 					od_cfg_diag_list_t *diags)
 {
@@ -1527,7 +1179,7 @@ static int od_cfg_validate_conn_drop_options(od_cfg_model_t *model,
 		return 0;
 	}
 
-	if (opts->interval_ms.seen.is_set && opts->interval_ms.value <= 0) {
+	if (opts->interval_ms.seen.is_set && opts->interval_ms.value == 0) {
 		od_cfg_diag_error(
 			diags, opts->interval_ms.seen.location,
 			"interval for conn_drop_options must be positive");
@@ -1542,14 +1194,30 @@ static int od_cfg_validate_soft_oom(od_cfg_model_t *model,
 {
 	od_cfg_soft_oom_t *so = &model->soft_oom;
 
-	if (!so->seen.is_set) {
+	int any = so->process.seen.is_set ||
+		  so->check_interval_ms.seen.is_set ||
+		  so->drop.signal.seen.is_set || so->drop.max_rate.seen.is_set;
+
+	if (!so->limit.seen.is_set) {
+		if (any) {
+			od_cfg_diag_error(
+				diags,
+				so->process.seen.is_set ?
+					so->process.seen.location :
+				so->check_interval_ms.seen.is_set ?
+					so->check_interval_ms.seen.location :
+				so->drop.signal.seen.is_set ?
+					so->drop.signal.seen.location :
+					so->drop.max_rate.seen.location,
+				"soft_oom_limit is not set for soft_oom");
+			return -1;
+		}
 		return 0;
 	}
 
-	if (so->seen.is_set &&
-	    (!so->limit.seen.is_set || so->limit.value == 0)) {
-		od_cfg_diag_error(diags, so->location,
-				  "limit is not set for soft_oom");
+	if (so->limit.value == 0) {
+		od_cfg_diag_error(diags, so->limit.seen.location,
+				  "soft_oom_limit must be positive");
 		return -1;
 	}
 
@@ -1780,6 +1448,45 @@ int od_cfg_set_string(od_cfg_diag_list_t *diags, od_cfg_string_field_t *field,
 	field->value = value;
 	od_cfg_seen_set(&field->seen, location);
 	return 0;
+}
+
+int od_cfg_string_list_begin(od_cfg_diag_list_t *diags,
+			     od_cfg_string_list_field_t *field,
+			     od_cfg_location_t location, const char *field_name)
+{
+	if (od_cfg_check_duplicate(diags, &field->seen, location, field_name) !=
+	    0) {
+		return -1;
+	}
+
+	od_cfg_seen_set(&field->seen, location);
+	return 0;
+}
+
+int od_cfg_string_list_append(od_cfg_diag_list_t *diags,
+			      od_cfg_string_list_field_t *field, char *value)
+{
+	char **values =
+		od_realloc(field->values, (field->count + 1) * sizeof(char *));
+	if (values == NULL) {
+		od_cfg_diag_error(diags, field->seen.location,
+				  "can't allocate string list");
+		od_free(value);
+		return -1;
+	}
+
+	field->values = values;
+	field->values[field->count++] = value;
+	return 0;
+}
+
+void od_cfg_string_list_free(od_cfg_string_list_field_t *field)
+{
+	for (size_t i = 0; i < field->count; ++i) {
+		od_free(field->values[i]);
+	}
+	od_free(field->values);
+	memset(field, 0, sizeof(*field));
 }
 
 int od_cfg_set_query_parsing_mode(od_cfg_diag_list_t *diags,

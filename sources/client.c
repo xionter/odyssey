@@ -45,6 +45,15 @@ void od_client_init(od_client_t *client)
 	kiwi_be_startup_init(&client->startup);
 	kiwi_vars_init(&client->vars);
 	kiwi_key_init(&client->key);
+	/*
+	 * od_malloc does not zero the struct; internal clients (auth
+	 * query, watchdog, group checker) never join the clients map,
+	 * so od_global_clients_map_add never fills the hash for them
+	 * - start deterministically zeroed instead of garbage
+	 */
+	client->key_hash = 0;
+
+	client->startup_raw = NULL;
 
 	od_io_init(&client->io);
 
@@ -65,8 +74,10 @@ void od_client_init(od_client_t *client)
 	memset(client->peer, 0, sizeof(client->peer));
 
 	memset(&client->query_ctx, 0, sizeof(client->query_ctx));
+	client->parser_mode = -1;
 
 	client->pending_begin = 0;
+	client->debug_log_sampled = -1;
 
 	memset(client->scram_client_key, 0, sizeof(client->scram_client_key));
 	memset(client->scram_server_key, 0, sizeof(client->scram_server_key));
@@ -76,7 +87,9 @@ void od_client_init(od_client_t *client)
 
 	/* Init GUCs. */
 	client->backend_pin = false;
+	client->backend_pin_listen = false;
 	client->opportunistic_acquire = false;
+	od_address_init(&client->execute_on_host);
 }
 
 void od_client_free(od_client_t *client)
@@ -89,6 +102,9 @@ void od_client_free(od_client_t *client)
 		od_rules_unref(client->rule);
 	}
 
+	kiwi_be_startup_free(&client->startup);
+	kiwi_vars_free(&client->vars);
+
 	od_relay_destroy(&client->relay);
 
 	od_query_ctx_reset(&client->query_ctx);
@@ -98,10 +114,10 @@ void od_client_free(od_client_t *client)
 	kiwi_password_free(&client->password);
 	kiwi_password_free(&client->received_password);
 	if (client->prep_stmt_ids) {
-		od_client_pstmt_hashmap_free(client->prep_stmt_ids);
+		od_client_pstmt_map_free(client->prep_stmt_ids);
 	}
 	if (client->portals) {
-		od_client_portal_hashmap_free(client->portals);
+		od_client_portal_map_free(client->portals);
 	}
 	if (client->external_id) {
 		od_free(client->external_id);
@@ -112,6 +128,9 @@ void od_client_free(od_client_t *client)
 	client->scram_key_valid = 0;
 
 	machine_msg_free_safe(client->read_msg);
+	machine_msg_free_safe(client->startup_raw);
+
+	od_address_destroy(&client->execute_on_host);
 
 	od_free(client);
 }
@@ -119,7 +138,7 @@ void od_client_free(od_client_t *client)
 uint32_t od_client_login_timeout(const od_client_t *client)
 {
 	if (client->source != NULL) {
-		return (uint32_t)client->source->config->client_login_timeout;
+		return (uint32_t)client->source->config->client_login_timeout_ms;
 	}
 
 	/* TODO: do not use infinite timeout */

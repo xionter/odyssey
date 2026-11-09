@@ -7,3 +7,7 @@ test: virtual_pin_backend
 test: ttt_pin_backend
 test: virtual_pooling_mode
 test: show_config_field
+test: select_from
+test: console_error_position
+test: failed_discard_all
+test: virtual_parser_mode

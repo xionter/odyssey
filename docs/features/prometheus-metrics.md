@@ -53,8 +53,14 @@ The Go-based exporter scrapes `SHOW POOLS_EXTENDED;` and `SHOW DATABASES;` and n
 | `odyssey_route_bytes_received_total` | `user`, `database` | Counter | Bytes received from clients on the route. |
 | `odyssey_route_bytes_sent_total` | `user`, `database` | Counter | Bytes sent to PostgreSQL backends. |
 | `odyssey_route_tcp_connections_total` | `user`, `database` | Counter | Client TCP connections opened toward the route. |
+| `odyssey_route_client_connections_created_total` | `user`, `database` | Counter | External client connections accepted into the route. |
+| `odyssey_route_client_connections_closed_total` | `user`, `database` | Counter | External client connections closed. |
+| `odyssey_route_server_connections_created_total` | `user`, `database` | Counter | Backend transport connections established for the route. |
+| `odyssey_route_server_connections_closed_total` | `user`, `database` | Counter | Backend connections closed or removed from the pool for closure, for any reason. |
+| `odyssey_route_server_connections_returned_total` | `user`, `database` | Counter | Open backend connections returned by clients to the pool. |
 | `odyssey_route_query_duration_seconds` | `user`, `database`, `quantile` | Gauge | Query latency quantiles (available when the `quantiles` rule option is set). |
 | `odyssey_route_transaction_duration_seconds` | `user`, `database`, `quantile` | Gauge | Transaction latency quantiles. |
+| `odyssey_route_client_lifetime_seconds` | `user`, `database`, `quantile` | Gauge | Lifetime quantiles of disconnected clients, from connection accept to session cleanup. |
 
 Saturation examples:
 
@@ -81,6 +87,71 @@ sustained starvation. Note that a client that starts to queue moves out of
 `waiting` series can fall exactly when saturation begins.
 
 Quantiles (`*_duration_seconds`) are instantaneous TDigest estimates; treat thresholds like gauges (for example, `odyssey_route_query_duration_seconds{quantile="0.95"} > 0.5`).
+
+### Connection lifecycle
+
+`SHOW POOLS_EXTENDED;` exposes these counters as INT8 columns:
+`client_connections`, `client_disconnections`, `server_connections`,
+`server_disconnections`, and `server_detaches`, respectively. Older Odyssey
+versions without these columns remain supported by the exporter.
+
+Client counters exclude internal clients and connections rejected before route
+assignment. Unlike the existing `tcp_conn_count`, the created counter does not
+include clients rejected by the route's connection limit. Backend counters include
+preallocated connections and connections whose TLS or PostgreSQL startup later
+fails; failed transport connects and standalone connections without a route
+(such as cancellation requests) are excluded.
+
+A detach counts as a return only if the connection stays open for the pool,
+including initial server parameter discovery and direct handoff to a waiting
+client. A detach that closes an obsolete
+or replication connection counts only as a closure. Preallocation is not a
+return. If a returned connection later expires while idle, both events count.
+Closures include normal expiration and errors, so their ratio to returns is not
+an error percentage. Counters live for the lifetime of their route and reset
+when the route is recreated or Odyssey restarts.
+
+Compare closure and return rates (events per second):
+
+```promql
+rate(odyssey_route_server_connections_closed_total[5m])
+rate(odyssey_route_server_connections_returned_total[5m])
+```
+
+### Client lifetime
+
+Enable the `quantiles` rule option on both the client route and the console route
+used by the exporter, for example `quantiles "0.5,0.95,0.99"`. The console rule
+selects the quantiles returned by `SHOW POOLS_EXTENDED;`; each client rule controls
+whether observations are collected for its route.
+
+`odyssey_route_client_lifetime_seconds` measures elapsed time from accepting a
+connection to the start of session cleanup, including startup and idle time.
+An observation is added once for each client with an assigned route that
+reaches `od_frontend_cleanup`, regardless of the session exit status. This
+includes attach failures, target session attributes mismatches, catchup
+timeouts, and other session errors. Early exits that bypass this function,
+including failures during initial startup or authentication, are not included.
+Collection does not depend on `log_session` or on having an attached backend
+server.
+
+The metric uses the same rotating t-digest windows as query and transaction
+quantiles. It is a gauge, not a cumulative Prometheus histogram: it has no
+`_bucket`, `_sum`, or `_count` series. Empty windows are reported as zero. Route
+quantiles cannot be averaged to obtain a percentile across routes or instances.
+
+`SHOW POOLS_EXTENDED;` exposes `client_lifetime_<quantile>` columns as 64-bit
+integer microseconds. The exporter converts these values to seconds and skips
+the `aggregated` row. SQL-based collectors such as a custom Telegraf input can
+read these columns directly; divide by `1000` for milliseconds or by `1e6` for
+seconds. Exporters also remain compatible with Odyssey versions without these
+columns; those versions simply do not produce the new metric.
+
+For example, the p95 lifetime on each route is:
+
+```promql
+odyssey_route_client_lifetime_seconds{quantile="0.95"}
+```
 
 ## Database-level averages
 

@@ -117,8 +117,8 @@ static void *machine_main(void *arg)
 	return NULL;
 }
 
-MACHINE_API int64_t machine_create(char *name, machine_coroutine_t function,
-				   void *arg)
+static int64_t machine_create_impl(int64_t forced_id, char *name,
+				   machine_coroutine_t function, void *arg)
 {
 	mm_machine_t *machine;
 	machine = mm_malloc(sizeof(*machine));
@@ -198,7 +198,12 @@ MACHINE_API int64_t machine_create(char *name, machine_coroutine_t function,
 		mm_free(machine);
 		return -1;
 	}
-	mm_machinemgr_add(&machinarium.machine_mgr, machine);
+	if (forced_id >= 0) {
+		mm_machinemgr_add_with_id(&machinarium.machine_mgr, machine,
+					  (uint64_t)forced_id);
+	} else {
+		mm_machinemgr_add(&machinarium.machine_mgr, machine);
+	}
 
 	rc = mm_thread_create(&machine->thread, 0, machine_main, machine);
 	if (rc == -1) {
@@ -210,6 +215,33 @@ MACHINE_API int64_t machine_create(char *name, machine_coroutine_t function,
 		return -1;
 	}
 	return machine->id;
+}
+
+MACHINE_API int64_t machine_reserve_ids(int count)
+{
+	if (count <= 0) {
+		mm_errno_set(EINVAL);
+		return -1;
+	}
+
+	mm_machinemgr_t *mgr = &machinarium.machine_mgr;
+	mm_spinlock_lock(&mgr->lock);
+	uint64_t base = mgr->seq;
+	mgr->seq += (uint64_t)count;
+	mm_spinlock_unlock(&mgr->lock);
+	return (int64_t)base;
+}
+
+MACHINE_API int64_t machine_create_at(uint64_t machine_id, char *name,
+				      machine_coroutine_t function, void *arg)
+{
+	return machine_create_impl((int64_t)machine_id, name, function, arg);
+}
+
+MACHINE_API int64_t machine_create(char *name, machine_coroutine_t function,
+				   void *arg)
+{
+	return machine_create_impl(-1, name, function, arg);
 }
 
 MACHINE_API int machine_wait(uint64_t machine_id)
@@ -513,4 +545,37 @@ void mm_machine_atexit(void (*fun)(void *), void *arg)
 
 	e->fptr = fun;
 	e->arg = arg;
+}
+
+MACHINE_API int machinarium_check_stack_depth(void)
+{
+	if (mm_self == NULL) {
+		return 0;
+	}
+
+	mm_coroutine_t *coro = mm_self->scheduler.current;
+	if (coro == NULL) {
+		return 0;
+	}
+
+	uintptr_t sp;
+	uintptr_t base = (uintptr_t)coro->stack.pointer;
+	uintptr_t end = base + coro->stack.size;
+
+#if defined(__has_builtin)
+#if __has_builtin(__builtin_frame_address)
+	sp = (uintptr_t)__builtin_frame_address(0);
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+	sp = (uintptr_t)__builtin_frame_address(0);
+#else
+	int unused = 42;
+	sp = (uintptr_t)(&unused);
+#endif
+
+	if (sp > end) {
+		return 0;
+	}
+
+	return (end - sp) >= coro->stack.max_depth;
 }

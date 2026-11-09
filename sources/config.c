@@ -9,6 +9,7 @@
 #include <odyssey.h>
 
 #include <unistd.h>
+#include <sys/un.h>
 
 #include <machinarium/machinarium.h>
 
@@ -19,6 +20,7 @@
 #include <tls.h>
 #include <od_memory.h>
 #include <util.h>
+#include <duration.h>
 
 void od_config_init(od_config_t *config)
 {
@@ -26,10 +28,13 @@ void od_config_init(od_config_t *config)
 	config->priority = 0;
 	config->sequential_routing = 0;
 	config->log_debug = 0;
+	config->log_debug_sampling = 100;
+	config->maintain_params = 1;
 	config->log_to_stdout = 1;
 	config->log_config = 0;
 	config->log_session = 1;
 	config->log_query = 0;
+	config->log_query_sampling = 100;
 	config->log_file = NULL;
 	config->log_stats = 1;
 	config->log_async = 1;
@@ -63,7 +68,7 @@ void od_config_init(od_config_t *config)
 	config->keepalive = 15;
 	config->keepalive_keep_interval = 5;
 	config->keepalive_probes = 3;
-	config->keepalive_usr_timeout = 0; /* use sys default */
+	config->keepalive_usr_timeout_ms = 0; /* use sys default */
 
 	config->cpu_affinity = NULL;
 	// od_affinity_config_init(&config->cpu_affinity);
@@ -74,7 +79,7 @@ void od_config_init(od_config_t *config)
 	config->client_max = 0;
 	config->client_max_routing = 0;
 	config->accept_rate_limit = 0;
-	config->server_login_retry = 1;
+	config->server_login_retry_ms = 1;
 	config->cache_coroutine = 1024;
 	config->cache_msg_gc_size = 0;
 	config->cache_msg_gc_count = 1024;
@@ -82,7 +87,13 @@ void od_config_init(od_config_t *config)
 	config->system_coroutine_stack_size = 32;
 	config->hba_file = NULL;
 	config->max_sigterms_to_die = 3;
-	config->group_checker_interval = 7000; /* 7 seconds */
+	config->group_checker_interval_ms = 7000; /* 7 seconds */
+
+	config->auth_query_cache_ttl_ms = 10 * 1000; /* 10 seconds */
+	config->auth_query_cache_ttl_jitter_ms = 5 * 1000; /* up to 5 seconds */
+	config->auth_query_cache_error_retry_ms = 1000; /* 1 second */
+	config->auth_query_cache_stale_on_error = 1;
+	config->auth_query_timeout_ms = 500; /* 500 ms */
 	od_list_init(&config->listen);
 
 	config->backend_connect_timeout_ms = 30U * 1000U; /* 30 seconds */
@@ -90,7 +101,10 @@ void od_config_init(od_config_t *config)
 	config->cancel_queue_timeout_ms = -1;
 	config->cancel_max_inflight = -1;
 	config->cancel_rate_limit = 0;
+	config->ignore_cancel = 0;
 	config->virtual_processing = 0;
+	config->replication_proxy_phys = 0;
+	config->replication_proxy_logic = 0;
 
 	config->graceful_shutdown_timeout_ms = 30 * 1000; /* 30 seconds */
 
@@ -111,15 +125,18 @@ void od_config_init(od_config_t *config)
 
 	config->smart_search_path_enquoting = 0;
 
-	config->dns_ttl_ms = 30 * 1000;
+	config->dns_cache_ttl_ms = 30 * 1000;
 }
 
 void od_config_reload(od_config_t *current_config, od_config_t *new_config)
 {
 	current_config->log_debug = new_config->log_debug;
+	current_config->log_debug_sampling = new_config->log_debug_sampling;
+	current_config->maintain_params = new_config->maintain_params;
 	current_config->log_config = new_config->log_config;
 	current_config->log_session = new_config->log_session;
 	current_config->log_query = new_config->log_query;
+	current_config->log_query_sampling = new_config->log_query_sampling;
 	current_config->log_stats = new_config->log_stats;
 	current_config->stats_interval = new_config->stats_interval;
 	current_config->client_max_set = new_config->client_max_set;
@@ -127,21 +144,37 @@ void od_config_reload(od_config_t *current_config, od_config_t *new_config)
 	current_config->max_sigterms_to_die = new_config->max_sigterms_to_die;
 	current_config->client_max_routing = new_config->client_max_routing;
 	current_config->accept_rate_limit = new_config->accept_rate_limit;
-	current_config->server_login_retry = new_config->server_login_retry;
+	current_config->server_login_retry_ms =
+		new_config->server_login_retry_ms;
 	current_config->backend_connect_timeout_ms =
 		new_config->backend_connect_timeout_ms;
 	current_config->cancel_timeout_ms = new_config->cancel_timeout_ms;
+	current_config->ignore_cancel = new_config->ignore_cancel;
 	current_config->smart_search_path_enquoting =
 		new_config->smart_search_path_enquoting;
 	current_config->disable_nolinger = new_config->disable_nolinger;
+	current_config->replication_proxy_phys =
+		new_config->replication_proxy_phys;
+	current_config->replication_proxy_logic =
+		new_config->replication_proxy_logic;
 	current_config->keepalive = new_config->keepalive;
 	current_config->keepalive_keep_interval =
 		new_config->keepalive_keep_interval;
 	current_config->keepalive_probes = new_config->keepalive_probes;
-	current_config->keepalive_usr_timeout =
-		new_config->keepalive_usr_timeout;
+	current_config->keepalive_usr_timeout_ms =
+		new_config->keepalive_usr_timeout_ms;
 	current_config->graceful_shutdown_timeout_ms =
 		new_config->graceful_shutdown_timeout_ms;
+	current_config->auth_query_cache_ttl_ms =
+		new_config->auth_query_cache_ttl_ms;
+	current_config->auth_query_cache_ttl_jitter_ms =
+		new_config->auth_query_cache_ttl_jitter_ms;
+	current_config->auth_query_cache_error_retry_ms =
+		new_config->auth_query_cache_error_retry_ms;
+	current_config->auth_query_cache_stale_on_error =
+		new_config->auth_query_cache_stale_on_error;
+	current_config->auth_query_timeout_ms =
+		new_config->auth_query_timeout_ms;
 }
 
 static void od_config_listen_free(od_config_listen_t *);
@@ -187,6 +220,14 @@ void od_config_free(od_config_t *config)
 	if (config->cpu_affinity) {
 		od_free(config->cpu_affinity);
 	}
+
+	od_config_query_parsing_t *qp = &config->query_parsing;
+	for (size_t i = 0; i < qp->standby_function_names_count; ++i) {
+		od_free(qp->standby_function_names[i]);
+	}
+	if (qp->standby_function_names) {
+		od_free(qp->standby_function_names);
+	}
 }
 
 od_config_listen_t *od_config_listen_add(od_config_t *config)
@@ -207,7 +248,7 @@ od_config_listen_t *od_config_listen_add(od_config_t *config)
 
 	listen->port = 6432;
 	listen->backlog = 128;
-	listen->client_login_timeout = 15000;
+	listen->client_login_timeout_ms = 15000;
 	listen->reserved_clients = -1; /* disabled */
 	listen->target_session_attrs = OD_TARGET_SESSION_ATTRS_UNDEF;
 	listen->auto_route_ro_on_standby = 0;
@@ -243,37 +284,35 @@ static void od_config_listen_free(od_config_listen_t *config)
 int od_config_validate(od_config_t *config, od_logger_t *logger)
 {
 	if (config->workers <= 0) {
-		od_error(logger, "config", NULL, NULL, "bad workers number");
+		od_error(logger, NULL, NULL, "bad workers number");
 		return -1;
 	}
 
 	if (config->resolvers <= 0) {
-		od_error(logger, "config", NULL, NULL, "bad resolvers number");
+		od_error(logger, NULL, NULL, "bad resolvers number");
 		return -1;
 	}
 
 	if (config->coroutine_stack_size < 4) {
-		od_error(logger, "config", NULL, NULL,
-			 "bad coroutine_stack_size number");
+		od_error(logger, NULL, NULL, "bad coroutine_stack_size number");
 		return -1;
 	}
 
 	if (config->system_coroutine_stack_size < 4) {
-		od_error(logger, "config", NULL, NULL,
+		od_error(logger, NULL, NULL,
 			 "bad system_coroutine_stack_size number");
 		return -1;
 	}
 
 	if (config->log_format == NULL) {
-		od_error(logger, "config", NULL, NULL,
-			 "log_format is not defined");
+		od_error(logger, NULL, NULL, "log_format is not defined");
 		return -1;
 	}
 
 	/* unix_socket_mode */
 	if (config->unix_socket_dir) {
 		if (config->unix_socket_mode == NULL) {
-			od_error(logger, "config", NULL, NULL,
+			od_error(logger, NULL, NULL,
 				 "unix_socket_mode is not set");
 			return -1;
 		}
@@ -281,8 +320,7 @@ int od_config_validate(od_config_t *config, od_logger_t *logger)
 
 	/* listen */
 	if (od_list_empty(&config->listen)) {
-		od_error(logger, "config", NULL, NULL,
-			 "no listen servers defined");
+		od_error(logger, NULL, NULL, "no listen servers defined");
 		return -1;
 	}
 
@@ -293,8 +331,24 @@ int od_config_validate(od_config_t *config, od_logger_t *logger)
 		if (listen->host == NULL) {
 			if (config->unix_socket_dir == NULL) {
 				od_error(
-					logger, "config", NULL, NULL,
+					logger, NULL, NULL,
 					"listen host is not set and no unix_socket_dir is specified");
+				return -1;
+			}
+
+			/*
+			 * unix socket path must fit into sockaddr_un.sun_path
+			 */
+			char sock_path[sizeof(
+				((struct sockaddr_un *)0)->sun_path)];
+			if (od_unix_socket_path(sock_path, sizeof(sock_path),
+						config->unix_socket_dir,
+						listen->port) == -1) {
+				od_error(logger, NULL, NULL,
+					 "unix socket path '%s/.s.PGSQL.%d' is "
+					 "too long (maximum %d characters)",
+					 config->unix_socket_dir, listen->port,
+					 (int)sizeof(sock_path) - 1);
 				return -1;
 			}
 		}
@@ -325,7 +379,7 @@ int od_config_validate(od_config_t *config, od_logger_t *logger)
 				listen->tls_opts->tls_mode =
 					OD_CONFIG_TLS_VERIFY_FULL;
 			} else {
-				od_error(logger, "config", NULL, NULL,
+				od_error(logger, NULL, NULL,
 					 "unknown tls_opts->tls mode");
 				return -1;
 			}
@@ -348,7 +402,7 @@ int od_config_validate(od_config_t *config, od_logger_t *logger)
 						   OD_CONFIG_TLS_PREFER;
 
 			od_error(
-				logger, "config", NULL, NULL,
+				logger, NULL, NULL,
 				"failed to load tls certificate for %s:%d%s: %s",
 				od_config_listen_host_name(listen),
 				listen->port,
@@ -364,7 +418,7 @@ int od_config_validate(od_config_t *config, od_logger_t *logger)
 	if (config->enable_online_restart_feature &&
 	    !config->bindwith_reuseport) {
 		od_error(
-			logger, "config", NULL, NULL,
+			logger, NULL, NULL,
 			"online restart feature works only with SO_REUSEPORT. Disable "
 			"online restart or/and enable bindwith_reuseport");
 		return NOT_OK_RESPONSE;
@@ -415,12 +469,18 @@ static const od_config_field_t od_config_fields[] = {
 	  offsetof(od_config_t, log_to_stdout), 0 },
 	{ "log_debug", OD_CONFIG_FIELD_BOOL, offsetof(od_config_t, log_debug),
 	  1 },
+	{ "log_debug_sampling", OD_CONFIG_FIELD_INT,
+	  offsetof(od_config_t, log_debug_sampling), 1 },
+	{ "maintain_params", OD_CONFIG_FIELD_BOOL,
+	  offsetof(od_config_t, maintain_params), 0 },
 	{ "log_config", OD_CONFIG_FIELD_BOOL, offsetof(od_config_t, log_config),
 	  1 },
 	{ "log_session", OD_CONFIG_FIELD_BOOL,
 	  offsetof(od_config_t, log_session), 1 },
 	{ "log_query", OD_CONFIG_FIELD_BOOL, offsetof(od_config_t, log_query),
 	  1 },
+	{ "log_query_sampling", OD_CONFIG_FIELD_INT,
+	  offsetof(od_config_t, log_query_sampling), 1 },
 	{ "log_queue_depth", OD_CONFIG_FIELD_INT,
 	  offsetof(od_config_t, log_queue_depth), 0 },
 	{ "log_async", OD_CONFIG_FIELD_BOOL, offsetof(od_config_t, log_async),
@@ -441,7 +501,7 @@ static const od_config_field_t od_config_fields[] = {
 	  offsetof(od_config_t, log_syslog_ident), 0 },
 	{ "log_syslog_facility", OD_CONFIG_FIELD_STRING,
 	  offsetof(od_config_t, log_syslog_facility), 0 },
-	{ "stats_interval", OD_CONFIG_FIELD_INT,
+	{ "stats_interval", OD_CONFIG_FIELD_DURATION_INT,
 	  offsetof(od_config_t, stats_interval), 1 },
 	{ "pid_file", OD_CONFIG_FIELD_STRING, offsetof(od_config_t, pid_file),
 	  0 },
@@ -455,7 +515,7 @@ static const od_config_field_t od_config_fields[] = {
 	  offsetof(od_config_t, external_auth_socket_path), 0 },
 	{ "graceful_die_on_errors", OD_CONFIG_FIELD_BOOL,
 	  offsetof(od_config_t, graceful_die_on_errors), 0 },
-	{ "graceful_shutdown_timeout_ms", OD_CONFIG_FIELD_INT,
+	{ "graceful_shutdown_timeout_ms", OD_CONFIG_FIELD_DURATION_U64,
 	  offsetof(od_config_t, graceful_shutdown_timeout_ms), 1 },
 	{ "enable_online_restart", OD_CONFIG_FIELD_BOOL,
 	  offsetof(od_config_t, enable_online_restart_feature), 0 },
@@ -466,14 +526,14 @@ static const od_config_field_t od_config_fields[] = {
 	{ "nodelay", OD_CONFIG_FIELD_BOOL, offsetof(od_config_t, nodelay), 0 },
 	{ "disable_nolinger", OD_CONFIG_FIELD_BOOL,
 	  offsetof(od_config_t, disable_nolinger), 1 },
-	{ "keepalive", OD_CONFIG_FIELD_INT, offsetof(od_config_t, keepalive),
-	  1 },
-	{ "keepalive_keep_interval", OD_CONFIG_FIELD_INT,
+	{ "keepalive", OD_CONFIG_FIELD_DURATION_INT,
+	  offsetof(od_config_t, keepalive), 1 },
+	{ "keepalive_keep_interval", OD_CONFIG_FIELD_DURATION_INT,
 	  offsetof(od_config_t, keepalive_keep_interval), 1 },
 	{ "keepalive_probes", OD_CONFIG_FIELD_INT,
 	  offsetof(od_config_t, keepalive_probes), 1 },
-	{ "keepalive_usr_timeout", OD_CONFIG_FIELD_INT,
-	  offsetof(od_config_t, keepalive_usr_timeout), 1 },
+	{ "keepalive_usr_timeout", OD_CONFIG_FIELD_DURATION_I64,
+	  offsetof(od_config_t, keepalive_usr_timeout_ms), 1 },
 	{ "workers", OD_CONFIG_FIELD_INT, offsetof(od_config_t, workers), 0 },
 	{ "resolvers", OD_CONFIG_FIELD_INT, offsetof(od_config_t, resolvers),
 	  0 },
@@ -483,8 +543,8 @@ static const od_config_field_t od_config_fields[] = {
 	  offsetof(od_config_t, client_max_routing), 1 },
 	{ "accept_rate_limit", OD_CONFIG_FIELD_INT,
 	  offsetof(od_config_t, accept_rate_limit), 1 },
-	{ "server_login_retry", OD_CONFIG_FIELD_INT,
-	  offsetof(od_config_t, server_login_retry), 1 },
+	{ "server_login_retry", OD_CONFIG_FIELD_DURATION_U64,
+	  offsetof(od_config_t, server_login_retry_ms), 1 },
 	{ "cache_coroutine", OD_CONFIG_FIELD_INT,
 	  offsetof(od_config_t, cache_coroutine), 0 },
 	{ "cache_msg_gc_size", OD_CONFIG_FIELD_INT,
@@ -495,20 +555,32 @@ static const od_config_field_t od_config_fields[] = {
 	  offsetof(od_config_t, coroutine_stack_size), 0 },
 	{ "system_coroutine_stack_size", OD_CONFIG_FIELD_INT,
 	  offsetof(od_config_t, system_coroutine_stack_size), 0 },
-	{ "dns_cache_ttl", OD_CONFIG_FIELD_INT,
-	  offsetof(od_config_t, dns_ttl_ms), 0 },
+	{ "dns_cache_ttl", OD_CONFIG_FIELD_DURATION_INT,
+	  offsetof(od_config_t, dns_cache_ttl_ms), 0 },
 	{ "hba_file", OD_CONFIG_FIELD_STRING, offsetof(od_config_t, hba_file),
 	  0 },
-	{ "group_checker_interval", OD_CONFIG_FIELD_INT,
-	  offsetof(od_config_t, group_checker_interval), 0 },
-	{ "backend_connect_timeout_ms", OD_CONFIG_FIELD_INT,
+	{ "group_checker_interval", OD_CONFIG_FIELD_DURATION_U64,
+	  offsetof(od_config_t, group_checker_interval_ms), 0 },
+	{ "auth_query_cache_ttl", OD_CONFIG_FIELD_DURATION_U64,
+	  offsetof(od_config_t, auth_query_cache_ttl_ms), 1 },
+	{ "auth_query_cache_ttl_jitter", OD_CONFIG_FIELD_DURATION_U64,
+	  offsetof(od_config_t, auth_query_cache_ttl_jitter_ms), 1 },
+	{ "auth_query_cache_error_retry", OD_CONFIG_FIELD_DURATION_U64,
+	  offsetof(od_config_t, auth_query_cache_error_retry_ms), 1 },
+	{ "auth_query_cache_stale_on_error", OD_CONFIG_FIELD_BOOL,
+	  offsetof(od_config_t, auth_query_cache_stale_on_error), 1 },
+	{ "auth_query_timeout", OD_CONFIG_FIELD_DURATION_U64,
+	  offsetof(od_config_t, auth_query_timeout_ms), 1 },
+	{ "backend_connect_timeout_ms", OD_CONFIG_FIELD_DURATION_U64,
 	  offsetof(od_config_t, backend_connect_timeout_ms), 1 },
-	{ "cancel_timeout_ms", OD_CONFIG_FIELD_INT,
+	{ "cancel_timeout_ms", OD_CONFIG_FIELD_DURATION_U64,
 	  offsetof(od_config_t, cancel_timeout_ms), 1 },
-	{ "cancel_queue_timeout_ms", OD_CONFIG_FIELD_INT,
+	{ "cancel_queue_timeout_ms", OD_CONFIG_FIELD_DURATION_I64,
 	  offsetof(od_config_t, cancel_queue_timeout_ms), 0 },
 	{ "cancel_max_inflight", OD_CONFIG_FIELD_INT,
 	  offsetof(od_config_t, cancel_max_inflight), 0 },
+	{ "ignore_cancel", OD_CONFIG_FIELD_BOOL,
+	  offsetof(od_config_t, ignore_cancel), 1 },
 	{ "virtual_processing", OD_CONFIG_FIELD_BOOL,
 	  offsetof(od_config_t, virtual_processing), 0 },
 	{ "virtual_transaction", OD_CONFIG_FIELD_BOOL,
@@ -521,6 +593,10 @@ static const od_config_field_t od_config_fields[] = {
 	  offsetof(od_config_t, host_watcher_enabled), 0 },
 	{ "smart_search_path_enquoting", OD_CONFIG_FIELD_BOOL,
 	  offsetof(od_config_t, smart_search_path_enquoting), 1 },
+	{ "replication_proxy_phys", OD_CONFIG_FIELD_BOOL,
+	  offsetof(od_config_t, replication_proxy_phys), 1 },
+	{ "replication_proxy_logic", OD_CONFIG_FIELD_BOOL,
+	  offsetof(od_config_t, replication_proxy_logic), 1 },
 };
 
 size_t od_config_fields_count(void)
@@ -536,6 +612,146 @@ const od_config_field_t *od_config_field_at(size_t index)
 	return &od_config_fields[index];
 }
 
+/* listed for SHOW CONFIG, but the parser accepts them only to ignore them */
+static const char *od_config_deprecated_keys[] = { "graceful_die_on_errors",
+						   NULL };
+
+int od_config_field_deprecated(const od_config_field_t *field)
+{
+	for (size_t i = 0; od_config_deprecated_keys[i] != NULL; i++) {
+		if (strcmp(field->key, od_config_deprecated_keys[i]) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+const od_config_field_t *od_config_field_by_key(const char *key)
+{
+	for (size_t i = 0; i < od_config_fields_count(); ++i) {
+		const od_config_field_t *field = &od_config_fields[i];
+		if (strcmp(field->key, key) == 0) {
+			return field;
+		}
+	}
+	return NULL;
+}
+
+/* -?[0-9]+, the only integer form the configuration grammar accepts */
+static int od_config_field_is_int(const char *value)
+{
+	const char *p = value;
+	if (*p == '-') {
+		p++;
+	}
+	if (*p == '\0') {
+		return 0;
+	}
+	for (; *p; p++) {
+		if (*p < '0' || *p > '9') {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/*
+ * The configuration lexer knows a single escape sequence inside a string:
+ * \" for a quote. Line breaks are rejected because the autoconf file is
+ * edited line by line, and a trailing backslash is rejected because it
+ * would escape the closing quote.
+ */
+static int od_config_field_format_string(const char *key, const char *value,
+					 char *buf, size_t size)
+{
+	size_t len = strlen(value);
+	if (len > 0 && value[len - 1] == '\\') {
+		return -1;
+	}
+
+	int n = snprintf(buf, size, "%s \"", key);
+	if (n < 0 || (size_t)n >= size) {
+		return -1;
+	}
+
+	/* every write below keeps at least one byte free for the terminator */
+	size_t pos = (size_t)n;
+	for (const char *p = value; *p; p++) {
+		if (*p == '\n' || *p == '\r') {
+			return -1;
+		}
+		if (*p == '"') {
+			if (pos + 2 >= size) {
+				return -1;
+			}
+			buf[pos++] = '\\';
+		} else if (pos + 1 >= size) {
+			return -1;
+		}
+		buf[pos++] = *p;
+	}
+
+	if (pos + 1 >= size) {
+		return -1;
+	}
+	buf[pos++] = '"';
+	buf[pos] = '\0';
+	return 0;
+}
+
+int od_config_field_format(const od_config_field_t *field, const char *value,
+			   char *buf, size_t size)
+{
+	int n;
+
+	switch (field->type) {
+	case OD_CONFIG_FIELD_DURATION_INT:
+	case OD_CONFIG_FIELD_DURATION_I64:
+	case OD_CONFIG_FIELD_DURATION_U64: {
+		od_duration_value_t parsed;
+		if (!od_duration_parse_value(value, &parsed, NULL)) {
+			return -1;
+		}
+		/* Keep the text: the config grammar applies the option's unit/range. */
+		return od_config_field_format_string(field->key, value, buf,
+						     size);
+	}
+	case OD_CONFIG_FIELD_INT:
+		/* workers "auto" means half of the CPUs, see cfg/parse.y */
+		if (strcmp(field->key, "workers") == 0 &&
+		    strcmp(value, "auto") == 0) {
+			n = snprintf(buf, size, "%s \"auto\"", field->key);
+			break;
+		}
+		if (!od_config_field_is_int(value)) {
+			return -1;
+		}
+		n = snprintf(buf, size, "%s %s", field->key, value);
+		break;
+	case OD_CONFIG_FIELD_BOOL:
+		if (strcasecmp(value, "yes") == 0) {
+			n = snprintf(buf, size, "%s yes", field->key);
+		} else if (strcasecmp(value, "no") == 0) {
+			n = snprintf(buf, size, "%s no", field->key);
+		} else {
+			return -1;
+		}
+		break;
+	case OD_CONFIG_FIELD_STRING:
+	case OD_CONFIG_FIELD_STRING_INLINE:
+		return od_config_field_format_string(field->key, value, buf,
+						     size);
+	default:
+		return -1;
+	}
+
+	/* od_snprintf() hides truncation, plain snprintf() reports it */
+	if (n < 0 || (size_t)n >= size) {
+		return -1;
+	}
+	return 0;
+}
+
 void od_config_field_value(od_config_t *config, const od_config_field_t *field,
 			   char *buf, size_t size)
 {
@@ -543,7 +759,16 @@ void od_config_field_value(od_config_t *config, const od_config_field_t *field,
 
 	switch (field->type) {
 	case OD_CONFIG_FIELD_INT:
+	case OD_CONFIG_FIELD_DURATION_INT:
 		od_snprintf(buf, size, "%d", *(int *)at);
+		break;
+	case OD_CONFIG_FIELD_I64:
+	case OD_CONFIG_FIELD_DURATION_I64:
+		od_snprintf(buf, size, "%" PRId64, *(int64_t *)at);
+		break;
+	case OD_CONFIG_FIELD_U64:
+	case OD_CONFIG_FIELD_DURATION_U64:
+		od_snprintf(buf, size, "%" PRIu64, *(uint64_t *)at);
 		break;
 	case OD_CONFIG_FIELD_BOOL:
 		od_snprintf(buf, size, "%s", *(int *)at ? "yes" : "no");
@@ -587,233 +812,248 @@ void od_config_field_default(const od_config_field_t *field, char *buf,
 
 void od_config_print(od_config_t *config, od_logger_t *logger)
 {
-	od_log(logger, "config", NULL, NULL, "daemonize               %s",
+	od_log(logger, NULL, NULL, "daemonize               %s",
 	       od_config_yes_no(config->daemonize));
-	od_log(logger, "config", NULL, NULL, "priority                %d",
+	od_log(logger, NULL, NULL, "priority                %d",
 	       config->priority);
-	od_log(logger, "config", NULL, NULL, "sequential_routing      %s",
+	od_log(logger, NULL, NULL, "sequential_routing      %s",
 	       od_config_yes_no(config->sequential_routing));
 	if (config->pid_file) {
-		od_log(logger, "config", NULL, NULL,
-		       "pid_file                %s", config->pid_file);
+		od_log(logger, NULL, NULL, "pid_file                %s",
+		       config->pid_file);
 	}
 	if (config->unix_socket_dir) {
-		od_log(logger, "config", NULL, NULL,
-		       "unix_socket_dir         %s", config->unix_socket_dir);
-		od_log(logger, "config", NULL, NULL,
-		       "unix_socket_mode        %s", config->unix_socket_mode);
+		od_log(logger, NULL, NULL, "unix_socket_dir         %s",
+		       config->unix_socket_dir);
+		od_log(logger, NULL, NULL, "unix_socket_mode        %s",
+		       config->unix_socket_mode);
 	}
 	if (config->log_format) {
-		od_log(logger, "config", NULL, NULL,
-		       "log_format              %s", config->log_format);
+		od_log(logger, NULL, NULL, "log_format              %s",
+		       config->log_format);
 	}
 	if (config->log_file) {
-		od_log(logger, "config", NULL, NULL,
-		       "log_file                %s", config->log_file);
+		od_log(logger, NULL, NULL, "log_file                %s",
+		       config->log_file);
 	}
-	od_log(logger, "config", NULL, NULL, "log_to_stdout           %s",
+	od_log(logger, NULL, NULL, "log_to_stdout           %s",
 	       od_config_yes_no(config->log_to_stdout));
-	od_log(logger, "config", NULL, NULL, "log_syslog              %s",
+	od_log(logger, NULL, NULL, "log_syslog              %s",
 	       od_config_yes_no(config->log_syslog));
 	if (config->log_syslog_ident) {
-		od_log(logger, "config", NULL, NULL,
-		       "log_syslog_ident        %s", config->log_syslog_ident);
+		od_log(logger, NULL, NULL, "log_syslog_ident        %s",
+		       config->log_syslog_ident);
 	}
 	if (config->log_syslog_facility) {
-		od_log(logger, "config", NULL, NULL,
-		       "log_syslog_facility     %s",
+		od_log(logger, NULL, NULL, "log_syslog_facility     %s",
 		       config->log_syslog_facility);
 	}
-	od_log(logger, "config", NULL, NULL, "log_debug               %s",
+	od_log(logger, NULL, NULL, "log_debug               %s",
 	       od_config_yes_no(config->log_debug));
-	od_log(logger, "config", NULL, NULL, "log_config              %s",
+	od_log(logger, NULL, NULL, "log_debug_sampling      %d",
+	       config->log_debug_sampling);
+	od_log(logger, NULL, NULL, "maintain_params         %s",
+	       od_config_yes_no(config->maintain_params));
+	od_log(logger, NULL, NULL, "log_config              %s",
 	       od_config_yes_no(config->log_config));
-	od_log(logger, "config", NULL, NULL, "log_session             %s",
+	od_log(logger, NULL, NULL, "log_session             %s",
 	       od_config_yes_no(config->log_session));
-	od_log(logger, "config", NULL, NULL, "log_query               %s",
+	od_log(logger, NULL, NULL, "log_query               %s",
 	       od_config_yes_no(config->log_query));
-	od_log(logger, "config", NULL, NULL, "log_stats               %s",
+	od_log(logger, NULL, NULL, "log_query_sampling      %d",
+	       config->log_query_sampling);
+	od_log(logger, NULL, NULL, "log_stats               %s",
 	       od_config_yes_no(config->log_stats));
-	od_log(logger, "config", NULL, NULL, "log_general_stats_prom  %s",
+	od_log(logger, NULL, NULL, "log_general_stats_prom  %s",
 	       od_config_yes_no(config->log_general_stats_prom));
-	od_log(logger, "config", NULL, NULL, "log_route_stats_prom    %s",
+	od_log(logger, NULL, NULL, "log_route_stats_prom    %s",
 	       od_config_yes_no(config->log_route_stats_prom));
-	od_log(logger, "config", NULL, NULL, "log_queue_depth         %d",
+	od_log(logger, NULL, NULL, "log_queue_depth         %d",
 	       config->log_queue_depth);
-	od_log(logger, "config", NULL, NULL, "stats_interval          %d",
+	od_log(logger, NULL, NULL, "stats_interval          %d",
 	       config->stats_interval);
-	od_log(logger, "config", NULL, NULL, "readahead               %d",
+	od_log(logger, NULL, NULL, "readahead               %d",
 	       config->readahead);
-	od_log(logger, "config", NULL, NULL, "nodelay                 %s",
+	od_log(logger, NULL, NULL, "nodelay                 %s",
 	       od_config_yes_no(config->nodelay));
-	od_log(logger, "config", NULL, NULL, "disable_nolinger        %s",
+	od_log(logger, NULL, NULL, "disable_nolinger        %s",
 	       od_config_yes_no(config->disable_nolinger));
-	od_log(logger, "config", NULL, NULL, "keepalive               %d",
+	od_log(logger, NULL, NULL, "keepalive               %d",
 	       config->keepalive);
-	od_log(logger, "config", NULL, NULL, "keepalive_keep_interval %d",
+	od_log(logger, NULL, NULL, "keepalive_keep_interval %d",
 	       config->keepalive_keep_interval);
-	od_log(logger, "config", NULL, NULL, "keepalive_probes        %d",
+	od_log(logger, NULL, NULL, "keepalive_probes        %d",
 	       config->keepalive_probes);
-	od_log(logger, "config", NULL, NULL, "keepalive_usr_timeout   %d",
-	       config->keepalive_usr_timeout);
+	od_log(logger, NULL, NULL, "keepalive_usr_timeout   %" PRId64,
+	       config->keepalive_usr_timeout_ms);
 	if (config->client_max_set) {
-		od_log(logger, "config", NULL, NULL,
-		       "client_max              %d", config->client_max);
+		od_log(logger, NULL, NULL, "client_max              %d",
+		       config->client_max);
 	}
-	od_log(logger, "config", NULL, NULL, "client_max_routing      %d",
+	od_log(logger, NULL, NULL, "client_max_routing      %d",
 	       config->client_max_routing);
-	od_log(logger, "config", NULL, NULL, "server_login_retry      %d",
-	       config->server_login_retry);
-	od_log(logger, "config", NULL, NULL, "cache_msg_gc_size       %d",
+	od_log(logger, NULL, NULL, "server_login_retry      %" PRIu64,
+	       config->server_login_retry_ms);
+	od_log(logger, NULL, NULL, "cache_msg_gc_size       %d",
 	       config->cache_msg_gc_size);
-	od_log(logger, "config", NULL, NULL, "cache_msg_gc_count      %d",
+	od_log(logger, NULL, NULL, "cache_msg_gc_count      %d",
 	       config->cache_msg_gc_count);
-	od_log(logger, "config", NULL, NULL, "cache_coroutine         %d",
+	od_log(logger, NULL, NULL, "cache_coroutine         %d",
 	       config->cache_coroutine);
-	od_log(logger, "config", NULL, NULL, "coroutine_stack_size    %d",
+	od_log(logger, NULL, NULL, "coroutine_stack_size    %d",
 	       config->coroutine_stack_size);
-	od_log(logger, "config", NULL, NULL, "system_coroutine_stack_size %d",
+	od_log(logger, NULL, NULL, "system_coroutine_stack_size %d",
 	       config->system_coroutine_stack_size);
-	od_log(logger, "config", NULL, NULL, "workers                 %d",
+	od_log(logger, NULL, NULL, "workers                 %d",
 	       config->workers);
-	od_log(logger, "config", NULL, NULL, "resolvers               %d",
+	od_log(logger, NULL, NULL, "resolvers               %d",
 	       config->resolvers);
-	od_log(logger, "config", NULL, NULL, "backend_connect_timeout_ms %u",
+	od_log(logger, NULL, NULL, "backend_connect_timeout_ms %" PRIu64,
 	       config->backend_connect_timeout_ms);
-	od_log(logger, "config", NULL, NULL, "cancel_timeout_ms         %u",
+	od_log(logger, NULL, NULL, "cancel_timeout_ms         %" PRIu64,
 	       config->cancel_timeout_ms);
-	od_log(logger, "config", NULL, NULL, "cancel_queue_timeout_ms   %u",
+	od_log(logger, NULL, NULL, "cancel_queue_timeout_ms   %" PRId64,
 	       config->cancel_queue_timeout_ms);
-	od_log(logger, "config", NULL, NULL, "cancel_max_inflight       %d",
+	od_log(logger, NULL, NULL, "cancel_max_inflight       %d",
 	       config->cancel_max_inflight);
-	od_log(logger, "config", NULL, NULL, "cancel_rate_limit         %d",
+	od_log(logger, NULL, NULL, "cancel_rate_limit         %d",
 	       config->cancel_rate_limit);
-	od_log(logger, "config", NULL, NULL, "dns_ttl_ms              %d",
-	       config->dns_ttl_ms);
-	od_log(logger, "config", NULL, NULL, "group_checker_interval  %d",
-	       config->group_checker_interval);
-	od_log(logger, "config", NULL, NULL, "max_sigterms_to_die     %d",
+	od_log(logger, NULL, NULL, "ignore_cancel            %s",
+	       od_config_yes_no(config->ignore_cancel));
+	od_log(logger, NULL, NULL, "dns_ttl_ms              %d",
+	       config->dns_cache_ttl_ms);
+	od_log(logger, NULL, NULL, "group_checker_interval  %" PRIu64,
+	       config->group_checker_interval_ms);
+	od_log(logger, NULL, NULL, "auth_query_cache_ttl            %" PRIu64,
+	       config->auth_query_cache_ttl_ms);
+	od_log(logger, NULL, NULL, "auth_query_cache_ttl_jitter     %" PRIu64,
+	       config->auth_query_cache_ttl_jitter_ms);
+	od_log(logger, NULL, NULL, "auth_query_cache_error_retry    %" PRIu64,
+	       config->auth_query_cache_error_retry_ms);
+	od_log(logger, NULL, NULL, "auth_query_cache_stale_on_error %s",
+	       od_config_yes_no(config->auth_query_cache_stale_on_error));
+	od_log(logger, NULL, NULL, "auth_query_timeout              %" PRIu64,
+	       config->auth_query_timeout_ms);
+	od_log(logger, NULL, NULL, "max_sigterms_to_die     %d",
 	       config->max_sigterms_to_die);
-	od_log(logger, "config", NULL, NULL, "virtual_processing      %s",
+	od_log(logger, NULL, NULL, "virtual_processing      %s",
 	       od_config_yes_no(config->virtual_processing));
-	od_log(logger, "config", NULL, NULL, "virtual_transaction     %s",
+	od_log(logger, NULL, NULL, "virtual_transaction     %s",
 	       od_config_yes_no(config->virtual_transaction));
-	od_log(logger, "config", NULL, NULL, "smart_search_path_enquoting %s",
+	od_log(logger, NULL, NULL, "replication_proxy_phys     %s",
+	       od_config_yes_no(config->replication_proxy_phys));
+	od_log(logger, NULL, NULL, "replication_proxy_logic    %s",
+	       od_config_yes_no(config->replication_proxy_logic));
+	od_log(logger, NULL, NULL, "smart_search_path_enquoting %s",
 	       od_config_yes_no(config->smart_search_path_enquoting));
-	od_log(logger, "config", NULL, NULL, "query_parsing mode       %s",
+	od_log(logger, NULL, NULL, "query_parsing_mode      %s",
 	       od_config_query_parsing_mode_to_str(config->query_parsing.mode));
-	od_log(logger, "config", NULL, NULL, "query_parsing max_query_len %zu",
+	od_log(logger, NULL, NULL, "query_parsing_max_query_len %zu",
 	       config->query_parsing.max_query_len);
-	od_log(logger, "config", NULL, NULL, "query_parsing mem_limit  %zu",
+	od_log(logger, NULL, NULL, "query_parsing_mem_limit %zu",
 	       config->query_parsing.mem_limit_bytes);
+	od_log(logger, NULL, NULL,
+	       "query_parsing_standby_function_list extra functions %zu",
+	       config->query_parsing.standby_function_names_count);
 	if (config->availability_zone[0]) {
-		od_log(logger, "config", NULL, NULL,
-		       "availability_zone       %s", config->availability_zone);
+		od_log(logger, NULL, NULL, "availability_zone       %s",
+		       config->availability_zone);
 	}
-	od_log(logger, "config", NULL, NULL, "enable_host_watcher:    %d",
+	od_log(logger, NULL, NULL, "enable_host_watcher:    %d",
 	       config->host_watcher_enabled);
 
-	od_log(logger, "config", NULL, NULL, "online restart enabled: %d",
+	od_log(logger, NULL, NULL, "online restart enabled: %d",
 	       config->enable_online_restart_feature);
 
-	od_log(logger, "config", NULL, NULL, "graceful die enabled:   %d",
+	od_log(logger, NULL, NULL, "graceful die enabled:   %d",
 	       config->graceful_die_on_errors);
 
-	od_log(logger, "config", NULL, NULL, "bindwith_reuseport:     %d",
+	od_log(logger, NULL, NULL, "bindwith_reuseport:     %d",
 	       config->bindwith_reuseport);
 
 	if (config->hba_file) {
-		od_log(logger, "config", NULL, NULL,
-		       "hba_file                %s", config->hba_file);
+		od_log(logger, NULL, NULL, "hba_file                %s",
+		       config->hba_file);
 	}
 
 	if (config->conn_drop_options.drop_enabled) {
-		od_log(logger, "config", NULL, NULL,
+		od_log(logger, NULL, NULL,
 		       "conn_drop_options: enabled, rate %d, interval_ms %d",
 		       config->conn_drop_options.rate,
 		       config->conn_drop_options.interval_ms);
 	}
 
 	if (config->soft_oom.enabled) {
-		od_log(logger, "config", NULL, NULL,
+		od_log(logger, NULL, NULL,
 		       "soft_oom: check '%s' every %dms with limit %" PRIu64
 		       " bytes",
 		       config->soft_oom.process,
 		       config->soft_oom.check_interval_ms,
 		       config->soft_oom.limit_bytes);
 		if (config->soft_oom.drop.enabled) {
-			od_log(logger, "config", NULL, NULL,
+			od_log(logger, NULL, NULL,
 			       "soft_oom drop: signal %d, max_rate %d",
 			       config->soft_oom.drop.signal,
 			       config->soft_oom.drop.max_rate);
 		}
 	} else {
-		od_log(logger, "config", NULL, NULL,
-		       "soft_oom:         DISABLED");
+		od_log(logger, NULL, NULL, "soft_oom:         DISABLED");
 	}
 
 	od_list_t *i;
 	od_list_foreach (&config->listen, i) {
 		od_config_listen_t *listen;
 		listen = od_container_of(i, od_config_listen_t, link);
-		od_log(logger, "config", NULL, NULL, "listen");
-		od_log(logger, "config", NULL, NULL, "  host          %s",
+		od_log(logger, NULL, NULL, "listen");
+		od_log(logger, NULL, NULL, "  host          %s",
 		       listen->host ? listen->host : "<unix socket>");
-		od_log(logger, "config", NULL, NULL, "  port          %d",
-		       listen->port);
-		od_log(logger, "config", NULL, NULL, "  backlog       %d",
+		od_log(logger, NULL, NULL, "  port          %d", listen->port);
+		od_log(logger, NULL, NULL, "  backlog       %d",
 		       listen->backlog);
-		od_log(logger, "config", NULL, NULL,
-		       "  client_login_timeout %d",
-		       listen->client_login_timeout);
-		od_log(logger, "config", NULL, NULL, "  reserved_clients %d",
+		od_log(logger, NULL, NULL, "  client_login_timeout %d",
+		       listen->client_login_timeout_ms);
+		od_log(logger, NULL, NULL, "  reserved_clients %d",
 		       listen->reserved_clients);
-		od_log(logger, "config", NULL, NULL,
-		       "  target_session_attrs %s",
+		od_log(logger, NULL, NULL, "  target_session_attrs %s",
 		       od_target_session_attrs_to_str(
 			       listen->target_session_attrs));
-		od_log(logger, "config", NULL, NULL,
-		       "  auto_route_ro_on_standby %s",
+		od_log(logger, NULL, NULL, "  auto_route_ro_on_standby %s",
 		       listen->auto_route_ro_on_standby ? "yes" : "no");
 		if (listen->balancing_override_set) {
-			od_log(logger, "config", NULL, NULL,
+			od_log(logger, NULL, NULL,
 			       "  balancing override: method %s, az_aware %d",
 			       od_balancing_method_to_str(
 				       listen->balancing_override.method.type),
 			       listen->balancing_override.method.az_aware);
 		}
 		if (listen->catchup_timeout) {
-			od_log(logger, "config", NULL, NULL,
-			       "  catchup_timeout %d", listen->catchup_timeout);
+			od_log(logger, NULL, NULL, "  catchup_timeout %d",
+			       listen->catchup_timeout);
 		}
 		if (listen->tls_opts->tls) {
-			od_log(logger, "config", NULL, NULL,
-			       "  tls           %s", listen->tls_opts->tls);
+			od_log(logger, NULL, NULL, "  tls           %s",
+			       listen->tls_opts->tls);
 		}
 		if (listen->tls_opts->tls_ca_file) {
-			od_log(logger, "config", NULL, NULL,
-			       "  tls_ca_file   %s",
+			od_log(logger, NULL, NULL, "  tls_ca_file   %s",
 			       listen->tls_opts->tls_ca_file);
 		}
 		if (listen->tls_opts->tls_key_file) {
-			od_log(logger, "config", NULL, NULL,
-			       "  tls_key_file  %s",
+			od_log(logger, NULL, NULL, "  tls_key_file  %s",
 			       listen->tls_opts->tls_key_file);
 		}
 		if (listen->tls_opts->tls_cert_file) {
-			od_log(logger, "config", NULL, NULL,
-			       "  tls_cert_file %s",
+			od_log(logger, NULL, NULL, "  tls_cert_file %s",
 			       listen->tls_opts->tls_cert_file);
 		}
 		if (listen->tls_opts->tls_protocols) {
-			od_log(logger, "config", NULL, NULL,
-			       "  tls_protocols %s",
+			od_log(logger, NULL, NULL, "  tls_protocols %s",
 			       listen->tls_opts->tls_protocols);
 		}
 
 		for (size_t i = 0; i < listen->storage_count; ++i) {
-			od_log(logger, "config", NULL, NULL,
-			       "  storage       %s", listen->storage_names[i]);
+			od_log(logger, NULL, NULL, "  storage       %s",
+			       listen->storage_names[i]);
 		}
 	}
 }

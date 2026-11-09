@@ -13,6 +13,7 @@
 #include <router.h>
 #include <system.h>
 #include <global.h>
+#include <wait_event.h>
 #include <module.h>
 #include <backend.h>
 #include <instance.h>
@@ -22,6 +23,7 @@
 #include <util.h>
 #include <stat.h>
 #include <pool.h>
+#include <cancel.h>
 
 void od_router_init(od_router_t *router, od_global_t *global)
 {
@@ -30,7 +32,7 @@ void od_router_init(od_router_t *router, od_global_t *global)
 	od_list_init(&router->servers);
 	od_route_pool_init(&router->route_pool);
 	atomic_init(&router->clients, 0);
-	router->servers_routing = 0;
+	atomic_init(&router->servers_routing, 0);
 
 	router->global = global;
 
@@ -72,7 +74,10 @@ void od_router_free(od_router_t *router)
 		od_system_server_free(server);
 	}
 
-	od_router_foreach(router, od_router_immed_close_cb, NULL);
+	/* Destruction requires exclusive ownership of the router. Avoid its
+	 * coroutine mutex so config errors can clean up before startup. */
+	od_route_pool_foreach(&router->route_pool, od_router_immed_close_cb,
+			      NULL);
 	od_rules_free(&router->rules);
 	od_route_pool_free(&router->route_pool);
 	mm_mutex_destroy(&router->lock);
@@ -133,7 +138,7 @@ int od_router_reconfigure(od_router_t *router, od_rules_t *rules)
 	od_list_foreach_safe (&not_changed, i, j) {
 		od_rule_key_t *rk;
 		rk = od_container_of(i, od_rule_key_t, link);
-		od_debug(&instance->logger, "reload", NULL, NULL,
+		od_debug(&instance->logger, NULL, NULL,
 			 "rule %s.%s %s %s was not changed", rk->db_name,
 			 rk->usr_name, rk->address_range.string_value,
 			 od_rule_conn_type_to_str(rk->conn_type));
@@ -147,7 +152,7 @@ int od_router_reconfigure(od_router_t *router, od_rules_t *rules)
 	od_list_foreach (&added, i) {
 		od_rule_key_t *rk;
 		rk = od_container_of(i, od_rule_key_t, link);
-		od_log(&instance->logger, "reload", NULL, NULL,
+		od_log(&instance->logger, NULL, NULL,
 		       "rule %s.%s %s %s was added", rk->db_name, rk->usr_name,
 		       rk->address_range.string_value,
 		       od_rule_conn_type_to_str(rk->conn_type));
@@ -156,7 +161,7 @@ int od_router_reconfigure(od_router_t *router, od_rules_t *rules)
 	od_list_foreach (&deleted, i) {
 		od_rule_key_t *rk;
 		rk = od_container_of(i, od_rule_key_t, link);
-		od_log(&instance->logger, "reload", NULL, NULL,
+		od_log(&instance->logger, NULL, NULL,
 		       "rule %s %s %s %s was deleted", rk->db_name,
 		       rk->usr_name, rk->address_range.string_value,
 		       od_rule_conn_type_to_str(rk->conn_type));
@@ -198,7 +203,7 @@ int od_router_reconfigure(od_router_t *router, od_rules_t *rules)
 	od_list_foreach_safe (&to_drop, i, j) {
 		od_rule_key_t *rk;
 		rk = od_container_of(i, od_rule_key_t, link);
-		od_debug(&instance->logger, "reload", NULL, NULL,
+		od_debug(&instance->logger, NULL, NULL,
 			 "rule %s.%s %s %s was dropped", rk->db_name,
 			 rk->usr_name, rk->address_range.string_value,
 			 od_rule_conn_type_to_str(rk->conn_type));
@@ -363,14 +368,16 @@ od_router_create_connected_server(od_route_t *route,
 	/* connect is long operation, so release lock, which was taken by the caller */
 	od_route_unlock(route);
 
-	int rc = od_backend_connect_to(server, "idle-preallocate", address,
-				       storage->tls_opts,
+	int rc = od_backend_connect_to(server, address, storage->tls_opts,
 				       OD_BACKEND_TLS_DEFAULT);
 
 	/* caller function believes the lock is held */
 	od_route_lock(route);
 
 	if (rc != OK_RESPONSE) {
+		/* No startup session: close without waiting on io under the lock. */
+		od_backend_abort_connection(server);
+		server->route = NULL;
 		od_backend_close(server);
 		return NULL;
 	}
@@ -402,7 +409,9 @@ static inline int od_router_create_idle_server(od_route_t *route,
 		 * so just release this connection and exit
 		 */
 
-		od_backend_close_connection(server);
+		/* This connection has not performed startup either. */
+		od_backend_abort_connection(server);
+		server->route = NULL;
 		od_backend_close(server);
 
 		return NOT_OK_RESPONSE;
@@ -419,9 +428,9 @@ static inline int od_router_create_idle_server(od_route_t *route,
 	od_server_set_pool_state(server, OD_SERVER_IDLE);
 
 	od_logger_t *logger = &server->global->instance->logger;
-	od_log(logger, "idle-preallocate", NULL, server,
-	       "idle server connection preallocated for %s.%s",
-	       route->id.database, route->id.user);
+	od_debug(logger, NULL, server,
+		 "idle server connection preallocated for %s.%s",
+		 route->id.database, route->id.user);
 
 	return OK_RESPONSE;
 }
@@ -677,7 +686,7 @@ od_router_status_t od_router_route(od_router_t *router, od_client_t *client)
 		od_router_unlock(router);
 		return OD_ROUTER_ERROR_NOT_FOUND;
 	}
-	od_debug(&instance->logger, "routing", NULL, NULL,
+	od_debug(&instance->logger, NULL, NULL,
 		 "matching rule: %s %s %s with %s routing type to %s client",
 		 rule->db_name, rule->user_name,
 		 rule->address_range.string_value,
@@ -712,7 +721,9 @@ od_router_status_t od_router_route(od_router_t *router, od_client_t *client)
 
 		/* need to unlock - will do i/o operation */
 		od_router_unlock(router);
+		od_wait_event_start(OD_WAIT_AUTH_LDAP);
 		int rc = od_auth_ldap_resolve_storage_credentials(client, rule);
+		od_wait_event_end(OD_WAIT_AUTH_LDAP);
 		od_router_lock(router);
 
 		od_rules_unref(rule);
@@ -734,7 +745,7 @@ od_router_status_t od_router_route(od_router_t *router, od_client_t *client)
 				od_strdup(client->ldap_storage_password);
 			rule->storage_password_len =
 				client->ldap_storage_password_len;
-			od_debug(&instance->logger, "routing", client, NULL,
+			od_debug(&instance->logger, client, NULL,
 				 "route->id.user changed to %s", id.user);
 		} else {
 			/* mask the possible insufficient access error */
@@ -784,6 +795,9 @@ od_router_status_t od_router_route(od_router_t *router, od_client_t *client)
 	/* add client to route client pool */
 	od_client_pool_set(&route->client_pool, client, OD_CLIENT_PENDING);
 	client->route = route;
+	if (client->type == OD_POOL_CLIENT_EXTERNAL) {
+		od_stat_client_connect(&route->stats);
+	}
 
 	od_route_unlock(route);
 	return OD_ROUTER_OK;
@@ -792,6 +806,7 @@ od_router_status_t od_router_route(od_router_t *router, od_client_t *client)
 void od_router_unroute(od_router_t *router, od_client_t *client)
 {
 	(void)router;
+
 	/* detach client from route */
 	od_assert(client->route);
 	od_assert(client->server == NULL);
@@ -799,6 +814,9 @@ void od_router_unroute(od_router_t *router, od_client_t *client)
 	od_route_t *route = client->route;
 	od_route_lock(route);
 	od_client_pool_set(&route->client_pool, client, OD_CLIENT_UNDEF);
+	if (client->type == OD_POOL_CLIENT_EXTERNAL) {
+		od_stat_client_disconnect(&route->stats);
+	}
 	client->route = NULL;
 	od_route_unlock(route);
 }
@@ -1053,10 +1071,10 @@ od_router_status_t od_router_attach(od_router_t *router, od_client_t *client,
 	od_assert(route != NULL);
 
 	uint64_t now_ms = machine_time_ms();
-	if (route->rule->pool->timeout <= 0) {
+	if (route->rule->pool->timeout_ms == 0) {
 		end_time_ms = UINT64_MAX;
 	} else {
-		end_time_ms = now_ms + (uint64_t)route->rule->pool->timeout;
+		end_time_ms = now_ms + route->rule->pool->timeout_ms;
 	}
 
 	int internal = route->rule->pool->routing == OD_RULE_POOL_INTERNAL;
@@ -1071,8 +1089,6 @@ od_router_status_t od_router_attach(od_router_t *router, od_client_t *client,
 	od_router_status_t status = OD_ROUTER_ERROR_TIMEDOUT;
 
 	while (now_ms < end_time_ms) {
-		uint64_t version = od_route_pools_version(route);
-
 		rc = od_router_try_attach(router, client, wait_for_idle,
 					  endpoint);
 		if (rc != OD_ROUTER_NEED_WAIT) {
@@ -1103,7 +1119,7 @@ od_router_status_t od_router_attach(od_router_t *router, od_client_t *client,
 				       notice_deadline - machine_time_ms());
 		}
 
-		od_route_wait(route, client, &endpoint->address, version,
+		od_route_wait(route, client, &endpoint->address,
 			      od_min(end_time_ms - now_ms, until_notice));
 		if (client->server != NULL) {
 			/* someone attached freed server directly to us */
@@ -1150,6 +1166,23 @@ void od_router_detach(od_router_t *router, od_client_t *client)
 
 	od_instance_t *instance = client->global->instance;
 
+	mm_hashmap_keylock_t client_klock;
+	int rc;
+	/*
+	 * only the per-key serialization against the cancel lookup is
+	 * needed here, so take the shard mutex without the chain
+	 * walk.  the client may already be unregistered from the map
+	 * (frontend cleanup removes it before unroute), but the lock
+	 * must still be taken: it also serializes with concurrent
+	 * lock_key users on the same shard, and the old found=0 path
+	 * silently skipped that
+	 */
+	rc = od_global_clients_map_lock_shard(
+		client->global->instance->clients_by_key, &client_klock,
+		client->key_hash);
+	(void)rc;
+	od_assert(rc == 0);
+
 	/* detach from current machine event loop */
 	od_server_t *server = client->server;
 	od_server_t *to_close = NULL;
@@ -1167,10 +1200,12 @@ void od_router_detach(od_router_t *router, od_client_t *client)
 	od_server_detach_client(server);
 
 	if (offline || is_repl) {
-		server->route = NULL;
 		od_server_set_pool_state(server, OD_SERVER_UNDEF);
+		server->route = NULL;
 		to_close = server;
 		server = NULL;
+	} else if (server->stats_connected) {
+		od_stat_server_detach(&route->stats);
 	}
 
 	od_client_pool_set(&route->client_pool, client, OD_CLIENT_PENDING);
@@ -1178,12 +1213,15 @@ void od_router_detach(od_router_t *router, od_client_t *client)
 
 	od_route_unlock(route);
 
+	od_global_clients_map_unlock(client->global->instance->clients_by_key,
+				     &client_klock);
+
 	if (to_close != NULL) {
 		if (is_repl) {
-			od_debug(&instance->logger, "expire-replication", NULL,
-				 to_close, "closing replication connection");
+			od_debug(&instance->logger, NULL, to_close,
+				 "closing replication connection");
 		} else if (offline) {
-			od_debug(&instance->logger, "expire", NULL, to_close,
+			od_debug(&instance->logger, NULL, to_close,
 				 "closing obsolete server connection");
 		}
 
@@ -1195,12 +1233,19 @@ void od_router_detach(od_router_t *router, od_client_t *client)
 void od_router_close(od_router_t *router, od_client_t *client)
 {
 	(void)router;
+
+	mm_hashmap_keylock_t client_klock;
+	int rc;
+	rc = od_global_clients_map_lock_shard(
+		client->global->instance->clients_by_key, &client_klock,
+		client->key_hash);
+	(void)rc;
+	od_assert(rc == 0);
+
 	od_route_t *route = client->route;
 	od_assert(route != NULL);
 
 	od_server_t *server = client->server;
-
-	od_backend_close_connection(server);
 
 	od_route_lock(route);
 
@@ -1213,53 +1258,63 @@ void od_router_close(od_router_t *router, od_client_t *client)
 
 	od_route_unlock(route);
 
+	od_global_clients_map_unlock(client->global->instance->clients_by_key,
+				     &client_klock);
+
+	/* Console readers cannot see this server after it leaves the pool. */
+	/* Terminate may wait on io, so send it without holding the pool lock. */
+	od_backend_close_connection(server);
 	od_assert(server->io.io == NULL);
 	od_server_free(server);
 }
 
-static inline int od_router_cancel_cmp(od_server_t *server, void **argv)
+void od_router_cancel(od_router_t *router, kiwi_key_t *key)
 {
-	/* check that server is attached and has corresponding cancellation key */
-	return (server->client != NULL) &&
-	       kiwi_key_cmp(&server->key_client, argv[0]);
-}
+	od_global_t *global = router->global;
 
-static inline int od_router_cancel_cb(od_route_t *route, void **argv)
-{
+	mm_hashmap_keylock_t client_klock;
+	int rc;
+	rc = od_global_clients_map_lock(global->instance->clients_by_key, key,
+					&client_klock);
+	(void)rc;
+	od_assert(rc == 0);
+
+	if (!client_klock.found) {
+		return;
+	}
+
+	od_client_t *client = od_global_clients_map_get_val(
+		global->instance->clients_by_key, &client_klock);
+	od_route_t *route = client->route;
 	od_route_lock(route);
 
-	od_server_t *server;
-	server = od_route_server_pool_foreach_locked(
-		route, OD_SERVER_ACTIVE, od_router_cancel_cmp, argv);
-
-	if (server) {
-		od_router_cancel_t *cancel = argv[1];
-		cancel->id = server->id;
-		cancel->key = server->key;
-		cancel->storage =
-			od_rules_storage_ref(server->endpoint->storage);
-		cancel->address = od_server_pool_address(server);
-		cancel->server = server;
-		od_server_cancel_begin(server);
+	od_server_t *server = client->server;
+	if (server == NULL) {
 		od_route_unlock(route);
-		return 1;
+		od_global_clients_map_unlock(global->instance->clients_by_key,
+					     &client_klock);
+		return;
 	}
+
+	od_rule_storage_t *storage = route->rule->storage;
+	const od_address_t *address = od_server_pool_address(server);
 
 	od_route_unlock(route);
-	return 0;
-}
 
-od_router_status_t od_router_cancel(od_router_t *router, kiwi_key_t *key,
-				    od_router_cancel_t *cancel)
-{
-	/* match server by client forged key */
-	void *argv[] = { key, cancel };
-	int rc;
-	rc = od_router_foreach(router, od_router_cancel_cb, argv);
-	if (rc <= 0) {
-		return OD_ROUTER_ERROR_NOT_FOUND;
+	od_stat_cancel(&route->stats);
+	int status =
+		od_cancel(global, storage, address, &server->key, &server->id);
+	if (status != OK_RESPONSE) {
+		/* The packet can arrive after our transport has failed. The client
+		 * key lock prevents detach until this backend is marked offline;
+		 * it must never be assigned to another frontend afterward. */
+		od_route_lock(route);
+		server->offline = 1;
+		od_route_unlock(route);
 	}
-	return OD_ROUTER_OK;
+
+	od_global_clients_map_unlock(global->instance->clients_by_key,
+				     &client_klock);
 }
 
 static inline int od_router_kill_cb(od_route_t *route, void **argv)

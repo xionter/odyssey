@@ -5,6 +5,8 @@ on:
   pull_request:
     branches: [ master ]
     paths:
+      - ".github/actions/test-logs/**"
+      - ".github/workflows/soft-oom.yml"
       - "sources/**"
       - "test/**"
       - "docker/**"
@@ -12,7 +14,12 @@ on:
       - "modules/**"
       - "cmake/**"
       - "!docker/prom-exporter/**"
+      - "!test/prom-exporter/**"
       - "!sources/machinarium/gdb/**"
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   soft_oom:
     name: soft_oom
@@ -22,4 +29,8 @@ jobs:
       with:
         submodules: recursive
     - name: Odyssey soft oom test
-      run: make soft-oom-test
+      shell: bash
+      run: make soft-oom-test 2>&1 | tee test-run.log
+    - name: Save logs on failure
+      if: failure()
+      uses: ./.github/actions/test-logs

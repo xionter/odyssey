@@ -82,6 +82,18 @@ static inline int od_snprintf(char *buf, int size, const char *fmt, ...)
 	return rc;
 }
 
+/* Formats "<unix_socket_dir>/.s.PGSQL.<port>" into buf.
+ * Returns the path length, or -1 if the path does not fit into buf. */
+static inline int od_unix_socket_path(char *buf, size_t size,
+				      const char *unix_socket_dir, int port)
+{
+	int len = snprintf(buf, size, "%s/.s.PGSQL.%d", unix_socket_dir, port);
+	if (od_unlikely(len < 0 || (size_t)len >= size)) {
+		return -1;
+	}
+	return len;
+}
+
 static inline int od_concat_prefer_right(char *out, size_t max,
 					 const char *left, size_t left_len,
 					 const char *right, size_t right_len)
@@ -158,10 +170,23 @@ static inline long od_memtol(char *data, size_t data_size, char **end_ptr,
 	return result;
 }
 
-static inline uint32_t od_bswap32(uint32_t x)
+/* Splits a NUL-terminated buffer into lines in place: replaces the next
+ * '\n' with '\0' and returns the line start, or NULL when exhausted.
+ * The last line may lack '\n'. */
+static inline char *od_next_line(char **cursor)
 {
-	return ((x << 24) & 0xff000000) | ((x << 8) & 0x00ff0000) |
-	       ((x >> 8) & 0x0000ff00) | ((x >> 24) & 0x000000ff);
+	char *line = *cursor;
+	if (*line == '\0') {
+		return NULL;
+	}
+	char *nl = strchr(line, '\n');
+	if (nl != NULL) {
+		*nl = '\0';
+		*cursor = nl + 1;
+	} else {
+		*cursor += strlen(line);
+	}
+	return line;
 }
 
 static inline void od_array_reverse_p(void **arr, size_t start, size_t end)

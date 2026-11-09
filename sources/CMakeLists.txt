@@ -8,6 +8,7 @@ option(MM_MEM_PROF "Built-in memory profiling" off)
 option(USE_TCMALLOC "Use TCMalloc" off)
 option(USE_TCMALLOC_PROFILE "Use TCMalloc with profiling" off)
 option(ENABLE_SSL_KEYLOG "Enable OpenSSL TLS key logging support" off)
+option(ENABLE_INJECTION_POINTS "Enable test injection points" OFF)
 
 set(od_binary ${CMAKE_PROJECT_NAME})
 set(od_src
@@ -26,6 +27,7 @@ set(od_src
     machinarium/loop.c
     machinarium/clock.c
     machinarium/socket.c
+    machinarium/file.c
     machinarium/stat.c
     machinarium/context_stack.c
     machinarium/context.c
@@ -60,6 +62,7 @@ set(od_src
     machinarium/dns.c
     machinarium/wait_list.c
     machinarium/wait_flag.c
+    machinarium/thread_pool.c
     machinarium/wait_group.c
     machinarium/zpq_stream.c
     machinarium/compression.c
@@ -80,12 +83,15 @@ set(od_src
     logger.c
     od_assert.c
     pool.c
+    port.c
     rules.c
     config.c
+    autoconf.c
     dns.c
     route.c
     router.c
     relay.c
+    virtual.c
     global.c
     system.c
     stream.c
@@ -102,6 +108,9 @@ set(od_src
     deploy.c
     reset.c
     pstmt.c
+    sql_pstmt.c
+    analyze.c
+    clients_map.c
     frontend.c
     backend.c
     instance.c
@@ -130,6 +139,7 @@ set(od_src
     tsa.c
     query.c
     storage.c
+    wait_event.c
     server.c
     shared_pool.c
     address.c
@@ -138,7 +148,6 @@ set(od_src
     mdb_iamproxy.c
     external_auth.c
     group.c
-    thread_pool.c
     xplan.c
     common/base64.c
     common/saslprep.c
@@ -190,7 +199,7 @@ BISON_TARGET(sql_parser
 FLEX_TARGET(sql_scanner
     sql/minimal/scan.l
     ${SQL_MINIMAL_GEN_DIR}/scan.c
-    COMPILE_FLAGS "--header-file=${SQL_MINIMAL_GEN_DIR}/scan.h"
+    COMPILE_FLAGS "--header-file=${SQL_MINIMAL_GEN_DIR}/scan.h -CF -8"
 )
 ADD_FLEX_BISON_DEPENDENCY(sql_scanner sql_parser)
 set_source_files_properties(${FLEX_sql_scanner_OUTPUTS} PROPERTIES
@@ -316,9 +325,14 @@ message(STATUS "USE_UCONTEXT:           ${USE_UCONTEXT}")
 message(STATUS "MM_MEM_PROF:            ${MM_MEM_PROF}")
 message(STATUS "USE_TCMALLOC:           ${USE_TCMALLOC}")
 message(STATUS "USE_TCMALLOC_PROFILE:   ${USE_TCMALLOC_PROFILE}")
+message(STATUS "ENABLE_INJECTION_POINTS: ${ENABLE_INJECTION_POINTS}")
 
 configure_file("include/build.h.cmake" "build.h")
 configure_file("include/machinarium/build.h.cmake" "machinarium/build.h")
+
+if (ENABLE_INJECTION_POINTS)
+    list(APPEND od_src injection.c)
+endif()
 
 if (PAM_FOUND)
     list(APPEND od_src pam.c)
@@ -372,6 +386,9 @@ set(od_test_src
     tests/kiwi/test_kiwi_enquote.c
     tests/kiwi/test_kiwi_pgoptions.c
     tests/kiwi/test_kiwi_fe_read_auth.c
+    tests/kiwi/test_kiwi_be_read_query.c
+    tests/kiwi/test_kiwi_cancel.c
+    tests/kiwi/test_kiwi_msg_size_limits.c
     tests/machinarium/test_init.c
     tests/machinarium/test_create0.c
     tests/machinarium/test_create1.c
@@ -418,12 +435,14 @@ set(od_test_src
     tests/machinarium/test_wait_list_one_producer_multiple_consumers.c
     tests/machinarium/test_wait_list_one_producer_multiple_consumers_threads.c
     tests/machinarium/test_wait_list_notify_all.c
+    tests/machinarium/test_machine_reserve_ids.c
     tests/machinarium/test_wait_group_simple.c
     tests/machinarium/test_wait_group_timeout.c
     tests/machinarium/test_wait_group_lifetime.c
     tests/machinarium/test_wait_flag_simple.c
     tests/machinarium/test_wait_flag_timeout.c
     tests/machinarium/test_hm_hash.c
+    tests/machinarium/test_hm_dist.c
     tests/machinarium/test_getaddrinfo0.c
     tests/machinarium/test_getaddrinfo1.c
     tests/machinarium/test_getaddrinfo2.c
@@ -432,6 +451,7 @@ set(od_test_src
     tests/machinarium/test_client_server2.c
     tests/machinarium/test_client_server_unix_socket.c
     tests/machinarium/test_client_server_unix_socket_no_msg.c
+    tests/machinarium/test_check_stack_depth.c
     tests/machinarium/test_coroutine_names.c
     tests/machinarium/test_mutex_threads.c
     tests/machinarium/test_mutex_coroutines.c
@@ -442,6 +462,7 @@ set(od_test_src
     tests/machinarium/test_read_timeout.c
     tests/machinarium/test_read_cancel.c
     tests/machinarium/test_read_var.c
+    tests/machinarium/test_read_close.c
     tests/machinarium/test_ring_buffer.c
     tests/machinarium/test_tls0.c
     tests/machinarium/test_tls_verify_error.c
@@ -455,8 +476,10 @@ set(od_test_src
     tests/machinarium/test_tls_read_var.c
     tests/machinarium/test_tsan_simple_race_example.c
     tests/machinarium/test_vrb.c
+    tests/machinarium/test_mutex_bench.c
     tests/machinarium/test_queue.c
     tests/machinarium/test_heap.c
+    tests/machinarium/test_clock.c
     tests/machinarium/test_lf_stack.c
     tests/machinarium/test_sem.c
     tests/odyssey/test_attribute.c
@@ -466,13 +489,21 @@ set(od_test_src
     tests/odyssey/test_address.c
     tests/odyssey/test_affinity.c
     tests/odyssey/test_pstmt.c
+    tests/odyssey/test_clients_map.c
+    tests/odyssey/test_router_free.c
     tests/odyssey/test_duration_parse.c
+    tests/odyssey/test_misc.c
     tests/odyssey/test_thread_pool.c
     tests/odyssey/test_linear_alloc.c
     tests/odyssey/test_scram.c
     tests/odyssey/test_sql_parser.c
     tests/odyssey/test_sql_full_parser.c
-    tests/odyssey/test_console_parser.c)
+    tests/odyssey/test_sql_pstmt.c
+    tests/odyssey/test_console_parser.c
+    tests/odyssey/test_config_field.c
+    tests/odyssey/test_autoconf.c
+    tests/odyssey/test_soft_oom.c
+    tests/odyssey/test_wait_event.c)
 
 include_directories("${PROJECT_SOURCE_DIR}/tests")
 include_directories("${PROJECT_BINARY_DIR}/tests")

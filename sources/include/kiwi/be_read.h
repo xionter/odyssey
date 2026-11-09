@@ -31,6 +31,13 @@ static inline void kiwi_be_startup_init(kiwi_be_startup_t *su)
 	kiwi_var_init(&su->replication, NULL, 0);
 }
 
+static inline void kiwi_be_startup_free(kiwi_be_startup_t *su)
+{
+	kiwi_var_free(&su->user);
+	kiwi_var_free(&su->database);
+	kiwi_var_free(&su->replication);
+}
+
 static inline int kiwi_be_read_options(kiwi_be_startup_t *su, char *pos,
 				       uint32_t pos_size, kiwi_vars_t *vars)
 {
@@ -68,8 +75,11 @@ static inline int kiwi_be_read_options(kiwi_be_startup_t *su, char *pos,
 			kiwi_var_set(&su->replication, KIWI_VAR_UNDEF, value,
 				     value_size);
 		} else if (name_size == 8 && !memcmp(name, "options", 8)) {
-			kiwi_parse_options_and_update_vars(vars, value,
-							   value_size);
+			rc = kiwi_parse_options_and_update_vars(vars, value,
+								value_size);
+			if (kiwi_unlikely(rc == -1)) {
+				return -1;
+			}
 		} else {
 			kiwi_vars_update(vars, name, name_size, value,
 					 value_size);
@@ -90,15 +100,6 @@ static inline int kiwi_be_read_options(kiwi_be_startup_t *su, char *pos,
 	return 0;
 }
 
-#define PG_PROTOCOL(m, n) (((m) << 16) | (n))
-#define PG_PROTOCOL_MAJOR(v) ((int)((v) >> 16))
-#define PG_PROTOCOL_MINOR(v) ((int)((v) & 0x0000ffff))
-#define NEGOTIATE_SSL_CODE PG_PROTOCOL(1234, 5679)
-#define NEGOTIATE_GSS_CODE PG_PROTOCOL(1234, 5680)
-#define CANCEL_REQUEST_CODE PG_PROTOCOL(1234, 5678)
-#define PG_PROTOCOL_LATEST PG_PROTOCOL(3, 0)
-#define PG_PROTOCOL_EARLIEST PG_PROTOCOL(3, 0)
-
 enum {
 	KIWI_STARTUP_READ_OK = 0,
 	KIWI_STARTUP_READ_LEN_ERROR,
@@ -115,9 +116,15 @@ KIWI_API static inline int kiwi_be_read_cancel_request(char **pos,
 	if (kiwi_unlikely(kiwi_read32(&su->key.key_pid, pos, pos_size) == -1)) {
 		return -1;
 	}
-	if (kiwi_unlikely(kiwi_read32(&su->key.key, pos, pos_size) == -1)) {
+	/* PostgreSQL accepts 1..256 bytes here; the stored key must match exactly. */
+	if (kiwi_unlikely(*pos_size == 0 ||
+			  *pos_size > KIWI_CANCEL_KEY_MAX_LEN)) {
 		return -1;
 	}
+	su->key.key_len = *pos_size;
+	memcpy(su->key.key, *pos, *pos_size);
+	*pos += *pos_size;
+	*pos_size = 0;
 	return 0;
 }
 
@@ -158,6 +165,9 @@ KIWI_API static inline int kiwi_be_read_startup(char *data, uint32_t size,
 	switch (version) {
 	/* CancelRequest */
 	case CANCEL_REQUEST_CODE:
+		if (kiwi_unlikely(len != size)) {
+			return KIWI_STARTUP_CANCEL_READ_ERROR;
+		}
 		su->is_cancel = 1;
 		rc = kiwi_be_read_cancel_request(&pos, &pos_size, su);
 		if (rc == -1) {
@@ -204,7 +214,8 @@ KIWI_API static inline int kiwi_be_read_password(char *data, uint32_t size,
 	if (kiwi_unlikely(header->type != KIWI_FE_PASSWORD_MESSAGE)) {
 		return -1;
 	}
-	if (len > PQ_SMALL_MESSAGE_LIMIT) {
+	/* len excludes the length word, which PG counts against the limit */
+	if (len > PG_MAX_AUTH_TOKEN_LENGTH - sizeof(uint32_t)) {
 		return -1;
 	}
 	pw->password_len = len;
@@ -228,7 +239,21 @@ KIWI_API static inline int kiwi_be_read_query(char *data, uint32_t size,
 	if (kiwi_unlikely(header->type != KIWI_FE_QUERY)) {
 		return -1;
 	}
-	*query = kiwi_header_data(header);
+	/*
+	 * The query string must be NUL-terminated exactly at the end of
+	 * the message.  A client may send a message without the trailing
+	 * zero (or an empty one): without the check the string is later
+	 * parsed by functions relying on strlen(), running past the end
+	 * of the message buffer (heap-buffer-overflow read).
+	 */
+	if (kiwi_unlikely(len == 0)) {
+		return -1;
+	}
+	char *query_str = kiwi_header_data(header);
+	if (kiwi_unlikely(query_str[len - 1] != '\0')) {
+		return -1;
+	}
+	*query = query_str;
 	*query_len = len;
 	return 0;
 }
@@ -282,6 +307,19 @@ kiwi_be_read_parse_dest(char *data, uint32_t size,
 	/* query and params */
 	dest->description_len = pos_size;
 	dest->description = pos;
+	/*
+	 * The description holds "query\0" followed by an int16 parameter
+	 * type count (and int32 oids).  Require a NUL-terminated query:
+	 * the stored description is later parsed with strlen-based
+	 * routines, a message without the terminator makes them read
+	 * past the end of the buffer.
+	 */
+	if (kiwi_unlikely(pos_size < 3)) {
+		return -1;
+	}
+	if (kiwi_unlikely(memchr(pos, '\0', pos_size - 2) == NULL)) {
+		return -1;
+	}
 	return 0;
 }
 

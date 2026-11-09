@@ -3,6 +3,7 @@
 #include <kiwi/kiwi.h>
 
 #include <pstmt.h>
+#include <analyze.h>
 #include <server.h>
 #include <client.h>
 #include <global.h>
@@ -16,6 +17,10 @@
 #include <misc.h>
 #include <util.h>
 #include <worker.h>
+#include <wait_event.h>
+
+/* max plan entries sent without a heap-allocated iovec array */
+#define OD_XPLAN_IOVEC_INLINE_MAX 32
 
 static inline kiwi_be_type_t msg_be_type(machine_msg_t *msg)
 {
@@ -176,23 +181,6 @@ static inline machine_msg_t *pstmt_already_exists_msg(const char *name)
 	return kiwi_be_write_error(NULL, KIWI_DUPLICATE_PSTATEMENT, buf, len);
 }
 
-static inline machine_msg_t *pstmt_does_not_exists_msg(const char *name)
-{
-	char buf[OD_QRY_MAX_SZ];
-	int len;
-	if (name[0] != '\0') {
-		len = od_snprintf(buf, sizeof(buf),
-				  "prepared statement \"%s\" does not exist",
-				  name);
-	} else {
-		len = od_snprintf(buf, sizeof(buf),
-				  "unnamed prepared statement does not exist");
-	}
-
-	return kiwi_be_write_error(NULL, KIWI_INVALID_SQL_STATEMENT_NAME, buf,
-				   len);
-}
-
 static void plan_entry_destroy(void *a)
 {
 	od_xplan_entry_t *entry = a;
@@ -240,6 +228,15 @@ static void entry_init_internal(od_xplan_entry_t *e, od_xplan_entry_type_t type,
 	e->delta.client_pstmt = client_pstmt;
 	e->delta.pstmt = pstmt;
 	e->delta.portal_name = portal_name;
+
+	if (client_pstmt != NULL) {
+		e->delta.client_pstmt_hash = od_hm_name_hash(
+			client_pstmt, (uint32_t)strlen(client_pstmt) + 1);
+	}
+	if (portal_name != NULL) {
+		e->delta.portal_name_hash = od_hm_name_hash(
+			portal_name, (uint32_t)strlen(portal_name) + 1);
+	}
 
 	if (e->delta.pstmt != NULL) {
 		od_pstmt_ref(e->delta.pstmt);
@@ -554,10 +551,12 @@ void od_xplan_clear(od_xplan_t *xp)
 	/* TODO: do not ignore error? */
 	mm_vector_clear(&xp->entries);
 	mm_vector_shrink_to_fit(&xp->entries);
+	xp->errored = 0;
 }
 
 static od_pstmt_t *plan_client_get_pstmt(od_xplan_t *xp, od_client_t *client,
-					 const char *pstmt_name)
+					 const char *pstmt_name,
+					 mm_hash_t pstmt_name_hash)
 {
 	/*
 	 * searching from newest state to oldest,
@@ -583,21 +582,24 @@ static od_pstmt_t *plan_client_get_pstmt(od_xplan_t *xp, od_client_t *client,
 		case OD_XPLAN_DELTA_ADD_CLIENT_ONLY:
 			/* fallthrough */
 		case OD_XPLAN_DELTA_ADD_BOTH:
-			if (strcmp(pstmt_name, delta->client_pstmt) == 0) {
+			if (delta->client_pstmt_hash == pstmt_name_hash &&
+			    strcmp(pstmt_name, delta->client_pstmt) == 0) {
 				/* found adding of the pstmt */
 				return delta->pstmt;
 			}
 			break;
 
 		case OD_XPLAN_DELTA_REMOVE_CLIENT_ONLY:
-			if (strcmp(pstmt_name, delta->client_pstmt) == 0) {
+			if (delta->client_pstmt_hash == pstmt_name_hash &&
+			    strcmp(pstmt_name, delta->client_pstmt) == 0) {
 				/* found removing of the pstmt */
 				return NULL;
 			}
 			break;
 
 		case OD_XPLAN_DELTA_REMOVE_CLIENT_ONLY_BY_NAME:
-			if (strcmp(pstmt_name, delta->client_pstmt) == 0) {
+			if (delta->client_pstmt_hash == pstmt_name_hash &&
+			    strcmp(pstmt_name, delta->client_pstmt) == 0) {
 				/* found removing of the pstmt */
 				return NULL;
 			}
@@ -613,11 +615,12 @@ static od_pstmt_t *plan_client_get_pstmt(od_xplan_t *xp, od_client_t *client,
 		}
 	}
 
-	return od_client_get_pstmt(client, pstmt_name);
+	return od_client_get_pstmt_hash(client, pstmt_name, pstmt_name_hash);
 }
 
 static od_pstmt_t *plan_client_get_portal(od_xplan_t *xp, od_client_t *client,
-					  const char *portal_name)
+					  const char *portal_name,
+					  mm_hash_t portal_name_hash)
 {
 	/*
 	 * searching from newest state to oldest,
@@ -643,14 +646,16 @@ static od_pstmt_t *plan_client_get_portal(od_xplan_t *xp, od_client_t *client,
 			break;
 
 		case OD_XPLAN_DELTA_ADD_PORTAL:
-			if (strcmp(portal_name, delta->portal_name) == 0) {
+			if (delta->portal_name_hash == portal_name_hash &&
+			    strcmp(portal_name, delta->portal_name) == 0) {
 				/* found portal -> pstmt mapping */
 				return delta->pstmt;
 			}
 			break;
 
 		case OD_XPLAN_DELTA_REMOVE_PORTAL:
-			if (strcmp(portal_name, delta->portal_name) == 0) {
+			if (delta->portal_name_hash == portal_name_hash &&
+			    strcmp(portal_name, delta->portal_name) == 0) {
 				/* found removing of the portal */
 				return NULL;
 			}
@@ -666,13 +671,15 @@ static od_pstmt_t *plan_client_get_portal(od_xplan_t *xp, od_client_t *client,
 		}
 	}
 
-	return od_client_get_portal(client, portal_name);
+	return od_client_get_portal_hash(client, portal_name, portal_name_hash);
 }
 
 static int plan_client_pstmt_exists(od_xplan_t *xp, od_client_t *client,
-				    const char *pstmt_name)
+				    const char *pstmt_name,
+				    mm_hash_t pstmt_name_hash)
 {
-	return plan_client_get_pstmt(xp, client, pstmt_name) != NULL;
+	return plan_client_get_pstmt(xp, client, pstmt_name, pstmt_name_hash) !=
+	       NULL;
 }
 
 static int plan_server_has_pstmt(od_xplan_t *xp, od_server_t *server,
@@ -747,10 +754,12 @@ static od_frontend_status_t plan_parse(od_relay_t *relay, od_xplan_t *xp,
 	od_frontend_status_t st;
 
 	machine_msg_t *msg = m->msg;
-	char *pstmt_name = od_pstmt_name_from_parse(msg);
+	uint32_t pstmt_name_len;
+	char *pstmt_name = od_pstmt_name_from_parse_len(msg, &pstmt_name_len);
 	if (pstmt_name == NULL) {
 		return OD_ECLIENT_PROTOCOL_ERROR;
 	}
+	mm_hash_t pstmt_name_hash = od_hm_name_hash(pstmt_name, pstmt_name_len);
 
 	od_pstmt_desc_t desc = od_pstmt_desc_from_parse(msg);
 	if (desc.data == NULL) {
@@ -764,7 +773,7 @@ static od_frontend_status_t plan_parse(od_relay_t *relay, od_xplan_t *xp,
 	 * without getting any error about pstmt already exists
 	 */
 	if (pstmt_name[0] != '\0' &&
-	    plan_client_pstmt_exists(xp, client, pstmt_name)) {
+	    plan_client_pstmt_exists(xp, client, pstmt_name, pstmt_name_hash)) {
 		machine_msg_t *vresp = pstmt_already_exists_msg(pstmt_name);
 		if (vresp == NULL) {
 			return OD_EOOM;
@@ -782,6 +791,24 @@ static od_frontend_status_t plan_parse(od_relay_t *relay, od_xplan_t *xp,
 		return OD_EOOM;
 	}
 	/* we now hold the ref to pstmt */
+
+	od_query_ctx_t parsed_ctx = { 0 };
+	const od_query_ctx_t *ctx = od_sql_parse_for_analysis(
+		client, desc.data, strlen(desc.data), pstmt, &parsed_ctx);
+	machine_msg_t *error = NULL;
+	st = OD_OK;
+	if (ctx != NULL) {
+		st = od_sql_analyze(client, ctx, &error);
+	}
+	od_query_ctx_reset(&parsed_ctx);
+	if (st != OD_OK) {
+		od_pstmt_unref(pstmt);
+		if (st == OD_SKIP) {
+			return xplan_append_virtual_error_response(xp, msg,
+								   error);
+		}
+		return st;
+	}
 
 	if (plan_server_has_pstmt(xp, server, pstmt)) {
 		/*
@@ -836,15 +863,19 @@ static od_frontend_status_t plan_describe(od_relay_t *relay, od_xplan_t *xp,
 	 * note: pstmt was returned without ref holded because
 	 * it already belongs to client or some xplan entry
 	 */
-	od_pstmt_t *pstmt = plan_client_get_pstmt(xp, client, pstmt_name);
+	od_pstmt_t *pstmt = plan_client_get_pstmt(
+		xp, client, pstmt_name,
+		od_hm_name_hash(pstmt_name, pstmt_name_len));
 	if (pstmt == NULL) {
-		machine_msg_t *vresp = pstmt_does_not_exists_msg(pstmt_name);
-		if (vresp == NULL) {
-			return OD_EOOM;
-		}
-
-		/* plan entry will take the additional ref to pstmt */
-		return xplan_append_virtual_error_response(xp, msg, vresp);
+		/*
+		 * the client never parsed this pstmt in its session, and
+		 * the backend only knows odyssey_pstmt_N names - forward
+		 * the original message unmodified and let the server produce
+		 * the appropriate ErrorResponse
+		 */
+		xp->errored = 1;
+		return xplan_append_fwd_no_delta(xp, msg,
+						 NULL /* no rewrite */);
 	}
 
 	/* will create xplan entry with ref if needed */
@@ -891,9 +922,12 @@ static od_frontend_status_t plan_close(od_relay_t *relay, od_xplan_t *xp,
 		 * original message owned by xbuf) - no double free on cleanup.
 		 */
 		od_xplan_entry_t e;
-		entry_init_fwd(&e, msg, NULL /* no rewrite, forward clmsg */,
-			       OD_XPLAN_DELTA_REMOVE_PORTAL, NULL, NULL);
-		e.delta.portal_name = pstmt_name;
+		entry_init_internal(&e, OD_XPLAN_FORWARD, msg,
+				    NULL /* srvmsg: return the original
+					  * clmsg, no double free */
+				    ,
+				    NULL, OD_XPLAN_DELTA_REMOVE_PORTAL, NULL,
+				    NULL, pstmt_name);
 		int rc = xplan_append(xp, &e);
 		if (rc != 0) {
 			return OD_EOOM;
@@ -923,8 +957,7 @@ static inline machine_msg_t *rewrite_bind_msg(char *data, int size,
 	/* packet header */
 	memcpy(rewrite_data, data, opname_start_offset);
 	/* prefix for opname */
-	od_snprintf(rewrite_data + opname_start_offset, opnamelen, "%s",
-		    opname);
+	memcpy(rewrite_data + opname_start_offset, opname, opnamelen);
 	/* rest of msg */
 	memcpy(rewrite_data + opname_start_offset + opnamelen,
 	       data + opname_start_offset + operator_name_len,
@@ -958,14 +991,20 @@ static od_frontend_status_t plan_bind(od_relay_t *relay, od_xplan_t *xp,
 	}
 
 	/* no ref to pstmt: already owned by client map or some plan entry */
-	od_pstmt_t *pstmt = plan_client_get_pstmt(xp, client, pstmt_name);
+	od_pstmt_t *pstmt = plan_client_get_pstmt(
+		xp, client, pstmt_name,
+		od_hm_name_hash(pstmt_name, pstmt_name_len));
 	if (pstmt == NULL) {
-		machine_msg_t *vresp = pstmt_does_not_exists_msg(pstmt_name);
-		if (vresp == NULL) {
-			return OD_EOOM;
-		}
-
-		return xplan_append_virtual_error_response(xp, msg, vresp);
+		/*
+		 * the client never parsed this pstmt in its session, and
+		 * the backend only knows odyssey_pstmt_N names - forward
+		 * the original Bind unmodified and let the server produce
+		 * the appropriate ErrorResponse (and the real ReadyForQuery
+		 * tx status)
+		 */
+		xp->errored = 1;
+		return xplan_append_fwd_no_delta(xp, msg,
+						 NULL /* no rewrite */);
 	}
 
 	int pstmt_start_offset = kiwi_be_bind_opname_offset(data, size);
@@ -1026,12 +1065,15 @@ static od_frontend_status_t plan_execute(od_relay_t *relay, od_xplan_t *xp,
 	 * no ref was created on pstmt
 	 * it is already holded by client map or some plan entry
 	 */
-	od_pstmt_t *pstmt = plan_client_get_portal(xp, client, portal_name);
+	od_pstmt_t *pstmt = plan_client_get_portal(
+		xp, client, portal_name,
+		od_hm_name_hash(portal_name, portal_name_len));
 	if (pstmt == NULL) {
 		/*
 		 * portal not found - just forward, let the server
 		 * produce the appropriate ErrorResponse
 		 */
+		xp->errored = 1;
 		return xplan_append_fwd_no_delta(xp, msg,
 						 NULL /* no rewrite */);
 	}
@@ -1058,7 +1100,7 @@ static od_frontend_status_t plan_execute(od_relay_t *relay, od_xplan_t *xp,
 	 */
 	const od_query_ctx_t *qctx = &pstmt->query_ctx;
 	if (od_query_ctx_has(qctx, OD_QUERY_CTX_IS_DISCARD_ALL)) {
-		od_debug(&instance->logger, "rewrite execute", client, server,
+		od_debug(&instance->logger, client, server,
 			 "DISCARD ALL detected via portal, invalidate caches");
 
 		return xplan_append_fwd(
@@ -1068,7 +1110,7 @@ static od_frontend_status_t plan_execute(od_relay_t *relay, od_xplan_t *xp,
 
 	if (od_query_ctx_has(qctx, OD_QUERY_CTX_IS_DEALLOCATE_ALL)) {
 		od_debug(
-			&instance->logger, "rewrite execute", client, server,
+			&instance->logger, client, server,
 			"DEALLOCATE ALL detected via portal, invalidate client caches");
 		return xplan_append_virtual_command_complete(
 			xp, msg, OD_XPLAN_DELTA_REMOVE_CLIENT_ALL, NULL, NULL,
@@ -1077,7 +1119,7 @@ static od_frontend_status_t plan_execute(od_relay_t *relay, od_xplan_t *xp,
 
 	/* DEALLOCATE name */
 	if (od_query_ctx_has(qctx, OD_QUERY_CTX_HAS_DEALLOCATE_NAME)) {
-		od_debug(&instance->logger, "rewrite execute", client, server,
+		od_debug(&instance->logger, client, server,
 			 "DEALLOCATE '%s' detected via portal", qctx->s1);
 		/*
 		 * TODO: PG returns ERROR 26000 if the statement does not
@@ -1225,10 +1267,12 @@ static od_frontend_status_t plan_with_pstmt_support(od_xplan_t *xp,
 		}
 
 		od_xplan_entry_t *last = mm_vector_back(&xp->entries);
-		if (last->type == OD_XPLAN_VIRTUAL_ERROR_RESPONSE) {
+		if (last->type == OD_XPLAN_VIRTUAL_ERROR_RESPONSE ||
+		    xp->errored) {
 			/*
-			 * last planned was error response
-			 * now skip all until flush/sync (which is last in xbuf)
+			 * last planned was (or will be) an error response -
+			 * now skip all until flush/sync (which is last in
+			 * xbuf), the backend discards them anyway
 			 */
 			break;
 		}
@@ -1277,6 +1321,17 @@ od_frontend_status_t od_xplan_make_from_xbuf(od_xplan_t *xp, od_relay_t *relay)
 	od_rule_t *rule = route->rule;
 	int reserve_prepared = rule->pool->reserve_prepared_statement;
 
+	if (server->is_error_tx) {
+		/*
+		 * the backend is in a failed transaction: it will reject
+		 * all commands until ROLLBACK anyway, so there is no point
+		 * in planning - forward everything as-is and let the backend
+		 * produce the real errors (25P02) and the real ReadyForQuery
+		 * tx status
+		 */
+		return plan_simple(xp, relay);
+	}
+
 	if (!reserve_prepared) {
 		return plan_simple(xp, relay);
 	}
@@ -1291,13 +1346,16 @@ delta_apply(od_xplan_delta_t *delta, od_client_t *client, od_server_t *server)
 
 	/*
 	 * UNLISTEN * is forwarded (not virtualized) — the server must
-	 * actually drop the subscription. after success, clear
-	 * backend_pin, matching simple-protocol process_unlisten.
+	 * actually drop the subscription. after success, clear the
+	 * LISTEN-origin backend_pin, matching simple-protocol
+	 * process_unlisten.
 	 */
 	if (delta->pstmt != NULL &&
 	    od_query_ctx_has(&delta->pstmt->query_ctx,
-			     OD_QUERY_CTX_IS_UNLISTEN_ALL)) {
+			     OD_QUERY_CTX_IS_UNLISTEN_ALL) &&
+	    client->backend_pin_listen) {
 		client->backend_pin = 0;
+		client->backend_pin_listen = 0;
 	}
 
 	if (type == OD_XPLAN_DELTA_ADD_BOTH ||
@@ -1321,16 +1379,21 @@ delta_apply(od_xplan_delta_t *delta, od_client_t *client, od_server_t *server)
 	case OD_XPLAN_DELTA_NONE:
 		break;
 	case OD_XPLAN_DELTA_REMOVE_CLIENT_ONLY:
-		od_client_remove_pstmt(client, delta->client_pstmt);
+		od_client_remove_pstmt_hash(client, delta->client_pstmt,
+					    delta->client_pstmt_hash);
 		break;
 	case OD_XPLAN_DELTA_REMOVE_CLIENT_ONLY_BY_NAME:
-		od_client_remove_pstmt(client, delta->client_pstmt);
+		od_client_remove_pstmt_hash(client, delta->client_pstmt,
+					    delta->client_pstmt_hash);
 		break;
 	case OD_XPLAN_DELTA_ADD_PORTAL:
-		od_client_add_portal(client, delta->portal_name, delta->pstmt);
+		od_client_add_portal_hash(client, delta->portal_name,
+					  delta->portal_name_hash,
+					  delta->pstmt);
 		break;
 	case OD_XPLAN_DELTA_REMOVE_PORTAL:
-		od_client_remove_portal(client, delta->portal_name);
+		od_client_remove_portal_hash(client, delta->portal_name,
+					     delta->portal_name_hash);
 		break;
 	case OD_XPLAN_DELTA_REMOVE_ALL:
 		od_client_pstmts_clear(client);
@@ -1476,15 +1539,15 @@ static od_frontend_status_t run_parse_shadow(od_xplan_entry_t *ps,
 		 * i think this ErrorResponse is nearly impossible on shadow parsing
 		 * but lets handle it, just in case
 		 */
-		od_backend_error(server, "main", machine_msg_data(msg),
+		od_backend_error(server, machine_msg_data(msg),
 				 machine_msg_size(msg));
-		od_error(&instance->logger, "main", client, server,
+		od_error(&instance->logger, client, server,
 			 "run_parse_shadow: ErrorResponse met");
 		status = OD_ESERVER_READ;
 		break;
 	default:
 		od_error(
-			&instance->logger, "main", client, server,
+			&instance->logger, client, server,
 			"run_parse_shadow: unexpected msg type from server '%c'",
 			type);
 		status = OD_ESERVER_READ;
@@ -1527,14 +1590,13 @@ static od_frontend_status_t run_deferred_begin(od_xplan_entry_t *ps,
 			if (type == KIWI_BE_COMMAND_COMPLETE) {
 				const char *command_tag =
 					data + sizeof(kiwi_header_t);
-				od_debug(&instance->logger, "main", client,
-					 server, "%s - %s",
+				od_debug(&instance->logger, client, server,
+					 "%s - %s",
 					 kiwi_be_type_to_string(type),
 					 command_tag);
 			} else {
-				od_debug(&instance->logger, "main", client,
-					 server, "%s",
-					 kiwi_be_type_to_string(type));
+				od_debug(&instance->logger, client, server,
+					 "%s", kiwi_be_type_to_string(type));
 			}
 		}
 
@@ -1546,11 +1608,10 @@ static od_frontend_status_t run_deferred_begin(od_xplan_entry_t *ps,
 			machine_msg_free(msg);
 			break;
 		case KIWI_BE_PARAMETER_STATUS:
-			rc = od_backend_update_parameter(server, "main", data,
-							 size, 0);
+			rc = od_backend_update_parameter(server, data, size, 0);
 			if (rc == -1) {
 				machine_msg_free(msg);
-				od_gerror("main", client, server,
+				od_gerror(client, server,
 					  "can't update parameter");
 				return OD_ESERVER_READ;
 			}
@@ -1573,9 +1634,10 @@ static od_frontend_status_t run_parse(od_xplan_entry_t *ps, od_client_t *client,
 	(void)ps;
 	(void)client;
 
-	return od_stream_server_exact_completes("main", server,
+	return od_stream_server_exact_completes(server,
 						1 /* one complete for parse */,
-						NULL, NULL, timeout_ms);
+						NULL, NULL, timeout_ms,
+						OD_WAIT_STREAM_SERVER_READ);
 }
 
 typedef struct {
@@ -1608,7 +1670,7 @@ static od_frontend_status_t forward_apply_delta_cb(kiwi_be_type_t type, void *a)
 		char buf[256];
 		plan_entry_description(entry, buf, sizeof(buf));
 		od_debug(
-			&instance->logger, "main", client, server,
+			&instance->logger, client, server,
 			"%s entry finished, response type = %c, apply_delta = %d",
 			buf, type, apply_delta);
 	}
@@ -1656,17 +1718,16 @@ run_forward_batch(od_xplan_t *xp, size_t begin, size_t end, /* [begin; end) */
 	while (arg.idx < end && !server->xproto_err) {
 		size_t left = end - arg.idx;
 
-		status =
-			od_stream_server_exact_completes("main", server, left,
-							 forward_apply_delta_cb,
-							 &arg, timeout_ms);
+		status = od_stream_server_exact_completes(
+			server, left, forward_apply_delta_cb, &arg, timeout_ms,
+			OD_WAIT_STREAM_SERVER_READ);
 
 		if (status == OD_COPY_IN_RECEIVED) {
 			machine_msg_t *add =
 				od_relay_get_copy_additional(&client->relay);
 
-			status = od_stream_copy_to_server(
-				"main", client, server, add, timeout_ms);
+			status = od_stream_copy_to_server(client, server, add,
+							  timeout_ms);
 
 			od_relay_set_copy_additional(&client->relay, NULL);
 
@@ -1701,7 +1762,8 @@ run_forward_batch(od_xplan_t *xp, size_t begin, size_t end, /* [begin; end) */
 	 * on ErrorResponse, RFQ is still pending and must be drained
 	 */
 	if (has_sync && server->xproto_err) {
-		status = od_stream_server_sync("main", server, timeout_ms);
+		status = od_stream_server_sync(server, timeout_ms,
+					       OD_WAIT_STREAM_SERVER_READ);
 	}
 
 	return status;
@@ -1820,7 +1882,7 @@ static od_frontend_status_t run_plan_impl(od_xplan_t *xp, od_relay_t *relay,
 		if (instance->config.log_debug || rule->log_debug) {
 			char buf[256];
 			plan_entry_description(entry, buf, sizeof(buf));
-			od_debug(&instance->logger, "main", client, server,
+			od_debug(&instance->logger, client, server,
 				 "%s entry finished with status %s", buf,
 				 od_frontend_status_to_str(status));
 		}
@@ -1846,7 +1908,9 @@ send_buf_and_run_plan(od_xplan_t *xp, od_relay_t *relay, struct iovec *iovecs,
 	od_client_t *client = relay->client;
 	od_server_t *server = client->server;
 
+	od_wait_event_start(OD_WAIT_QUERY_SERVER_WRITE);
 	int rc = od_io_writev(&server->io, iovecs, niovecs, timeout_ms, 0);
+	od_wait_event_end(OD_WAIT_QUERY_SERVER_WRITE);
 	if (rc == -1) {
 		return OD_ESERVER_WRITE;
 	}
@@ -1876,8 +1940,7 @@ static inline void log_plan_debug(od_instance_t *instance, od_xplan_t *xp,
 	}
 
 	pos += od_snprintf(pos, end - pos, ")");
-	od_debug(&instance->logger, "main", client, client->server, "xplan: %s",
-		 msg);
+	od_debug(&instance->logger, client, client->server, "xplan: %s", msg);
 
 	od_free(msg);
 }
@@ -1901,8 +1964,8 @@ static inline void log_srv_send_buf(od_instance_t *instance,
 	}
 
 	pos += od_snprintf(pos, end - pos, ")");
-	od_debug(&instance->logger, "main", client, client->server,
-		 "server buf: %s", msg);
+	od_debug(&instance->logger, client, client->server, "server buf: %s",
+		 msg);
 
 	od_free(msg);
 }
@@ -1928,8 +1991,7 @@ static inline void log_xbuf(od_instance_t *instance, od_client_t *client,
 	}
 
 	pos += od_snprintf(pos, end - pos, ")");
-	od_debug(&instance->logger, "main", client, client->server, "xbuf: %s",
-		 msg);
+	od_debug(&instance->logger, client, client->server, "xbuf: %s", msg);
 
 	od_free(msg);
 }
@@ -1944,10 +2006,16 @@ od_frontend_status_t od_xplan_run(od_xplan_t *xp, od_relay_t *relay,
 	size_t count = mm_vector_size(&xp->entries);
 	od_assert(count > 0);
 
-	size_t niovecs = count;
-	struct iovec *iovecs = od_malloc(sizeof(struct iovec) * niovecs);
-	if (iovecs == NULL) {
-		return OD_EOOM;
+	/* most plans are small: avoid a heap round-trip per flush */
+	struct iovec stack_iovecs[OD_XPLAN_IOVEC_INLINE_MAX];
+	struct iovec *iovecs;
+	if (count <= OD_XPLAN_IOVEC_INLINE_MAX) {
+		iovecs = stack_iovecs;
+	} else {
+		iovecs = od_malloc(sizeof(struct iovec) * count);
+		if (iovecs == NULL) {
+			return OD_EOOM;
+		}
 	}
 
 	size_t written = prepare_send_iovecs(xp, iovecs);
@@ -1961,7 +2029,9 @@ od_frontend_status_t od_xplan_run(od_xplan_t *xp, od_relay_t *relay,
 	od_frontend_status_t status =
 		send_buf_and_run_plan(xp, relay, iovecs, written, timeout_ms);
 
-	od_free(iovecs);
+	if (iovecs != stack_iovecs) {
+		od_free(iovecs);
+	}
 
 	return status;
 }
