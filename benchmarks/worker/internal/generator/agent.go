@@ -20,18 +20,23 @@ type Operation func(context.Context) error
 
 type Generator struct {
 	workerapi.UnimplementedLoadGeneratorServer
-	mu         sync.Mutex
-	operation  Operation
-	runID      string
-	scenario   string
-	target     string
-	operations uint32
-	state      string
-	err        error
-	started    time.Time
-	finished   time.Time
-	cancel     context.CancelFunc
-	done       chan struct{}
+	mu                      sync.Mutex
+	operation               Operation
+	runID                   string
+	scenario                string
+	targetHost              string
+	targetPort              uint32
+	database                string
+	user                    string
+	clients                 uint32
+	durationSeconds         uint32
+	progressIntervalSeconds uint32
+	state                   string
+	err                     error
+	started                 time.Time
+	finished                time.Time
+	cancel                  context.CancelFunc
+	done                    chan struct{}
 }
 
 func New(operation Operation) *Generator {
@@ -58,8 +63,13 @@ func (generator *Generator) Prepare(_ context.Context, request *workerapi.Prepar
 
 	generator.runID = request.RunId
 	generator.scenario = request.ScenarioId
-	generator.target = request.Target
-	generator.operations = request.Operations
+	generator.targetHost = request.TargetHost
+	generator.targetPort = request.TargetPort
+	generator.database = request.Database
+	generator.user = request.User
+	generator.clients = request.Clients
+	generator.durationSeconds = request.DurationSeconds
+	generator.progressIntervalSeconds = request.ProgressIntervalSeconds
 	generator.err = nil
 	generator.started = time.Time{}
 	generator.finished = time.Time{}

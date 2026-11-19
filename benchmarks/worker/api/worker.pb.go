@@ -21,15 +21,19 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Параметры подготовки
 type PrepareRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	ScenarioId    string                 `protobuf:"bytes,2,opt,name=scenario_id,json=scenarioId,proto3" json:"scenario_id,omitempty"`
-	Target        string                 `protobuf:"bytes,3,opt,name=target,proto3" json:"target,omitempty"`
-	Operations    uint32                 `protobuf:"varint,4,opt,name=operations,proto3" json:"operations,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                   protoimpl.MessageState `protogen:"open.v1"`
+	RunId                   string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	ScenarioId              string                 `protobuf:"bytes,2,opt,name=scenario_id,json=scenarioId,proto3" json:"scenario_id,omitempty"`
+	TargetHost              string                 `protobuf:"bytes,3,opt,name=target_host,json=targetHost,proto3" json:"target_host,omitempty"`
+	TargetPort              uint32                 `protobuf:"varint,4,opt,name=target_port,json=targetPort,proto3" json:"target_port,omitempty"`
+	Database                string                 `protobuf:"bytes,5,opt,name=database,proto3" json:"database,omitempty"`
+	User                    string                 `protobuf:"bytes,6,opt,name=user,proto3" json:"user,omitempty"`
+	Clients                 uint32                 `protobuf:"varint,7,opt,name=clients,proto3" json:"clients,omitempty"`
+	DurationSeconds         uint32                 `protobuf:"varint,8,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
+	ProgressIntervalSeconds uint32                 `protobuf:"varint,9,opt,name=progress_interval_seconds,json=progressIntervalSeconds,proto3" json:"progress_interval_seconds,omitempty"`
+	unknownFields           protoimpl.UnknownFields
+	sizeCache               protoimpl.SizeCache
 }
 
 func (x *PrepareRequest) Reset() {
@@ -76,21 +80,55 @@ func (x *PrepareRequest) GetScenarioId() string {
 	return ""
 }
 
-func (x *PrepareRequest) GetTarget() string {
+func (x *PrepareRequest) GetTargetHost() string {
 	if x != nil {
-		return x.Target
+		return x.TargetHost
 	}
 	return ""
 }
 
-func (x *PrepareRequest) GetOperations() uint32 {
+func (x *PrepareRequest) GetTargetPort() uint32 {
 	if x != nil {
-		return x.Operations
+		return x.TargetPort
 	}
 	return 0
 }
 
-// Результат подготовки
+func (x *PrepareRequest) GetDatabase() string {
+	if x != nil {
+		return x.Database
+	}
+	return ""
+}
+
+func (x *PrepareRequest) GetUser() string {
+	if x != nil {
+		return x.User
+	}
+	return ""
+}
+
+func (x *PrepareRequest) GetClients() uint32 {
+	if x != nil {
+		return x.Clients
+	}
+	return 0
+}
+
+func (x *PrepareRequest) GetDurationSeconds() uint32 {
+	if x != nil {
+		return x.DurationSeconds
+	}
+	return 0
+}
+
+func (x *PrepareRequest) GetProgressIntervalSeconds() uint32 {
+	if x != nil {
+		return x.ProgressIntervalSeconds
+	}
+	return 0
+}
+
 type PrepareResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -143,7 +181,6 @@ func (x *PrepareResponse) GetState() string {
 	return ""
 }
 
-// Параметры запуска
 type StartRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -188,7 +225,6 @@ func (x *StartRequest) GetRunId() string {
 	return ""
 }
 
-// Результат запуска
 type StartResponse struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
 	RunId           string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -249,7 +285,6 @@ func (x *StartResponse) GetStartedUnixNano() int64 {
 	return 0
 }
 
-// Параметры остановки
 type StopRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -294,14 +329,18 @@ func (x *StopRequest) GetRunId() string {
 	return ""
 }
 
-// Результат остановки
 type StopResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	State         string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
-	ElapsedNanos  int64                  `protobuf:"varint,3,opt,name=elapsed_nanos,json=elapsedNanos,proto3" json:"elapsed_nanos,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	RunId            string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	State            string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	ElapsedNanos     int64                  `protobuf:"varint,3,opt,name=elapsed_nanos,json=elapsedNanos,proto3" json:"elapsed_nanos,omitempty"`
+	ExitCode         int32                  `protobuf:"varint,4,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	Stdout           string                 `protobuf:"bytes,5,opt,name=stdout,proto3" json:"stdout,omitempty"`
+	Stderr           string                 `protobuf:"bytes,6,opt,name=stderr,proto3" json:"stderr,omitempty"`
+	FinishedUnixNano int64                  `protobuf:"varint,7,opt,name=finished_unix_nano,json=finishedUnixNano,proto3" json:"finished_unix_nano,omitempty"`
+	Error            string                 `protobuf:"bytes,8,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StopResponse) Reset() {
@@ -355,7 +394,41 @@ func (x *StopResponse) GetElapsedNanos() int64 {
 	return 0
 }
 
-// Запрос состояния
+func (x *StopResponse) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+func (x *StopResponse) GetStdout() string {
+	if x != nil {
+		return x.Stdout
+	}
+	return ""
+}
+
+func (x *StopResponse) GetStderr() string {
+	if x != nil {
+		return x.Stderr
+	}
+	return ""
+}
+
+func (x *StopResponse) GetFinishedUnixNano() int64 {
+	if x != nil {
+		return x.FinishedUnixNano
+	}
+	return 0
+}
+
+func (x *StopResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
 type StatusRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
@@ -400,15 +473,18 @@ func (x *StatusRequest) GetRunId() string {
 	return ""
 }
 
-// Текущее состояние запуска
 type StatusResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	State         string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
-	ElapsedNanos  int64                  `protobuf:"varint,3,opt,name=elapsed_nanos,json=elapsedNanos,proto3" json:"elapsed_nanos,omitempty"`
-	Error         string                 `protobuf:"bytes,4,opt,name=error,proto3" json:"error,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	RunId            string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	State            string                 `protobuf:"bytes,2,opt,name=state,proto3" json:"state,omitempty"`
+	ElapsedNanos     int64                  `protobuf:"varint,3,opt,name=elapsed_nanos,json=elapsedNanos,proto3" json:"elapsed_nanos,omitempty"`
+	ExitCode         int32                  `protobuf:"varint,4,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	Stdout           string                 `protobuf:"bytes,5,opt,name=stdout,proto3" json:"stdout,omitempty"`
+	Stderr           string                 `protobuf:"bytes,6,opt,name=stderr,proto3" json:"stderr,omitempty"`
+	FinishedUnixNano int64                  `protobuf:"varint,7,opt,name=finished_unix_nano,json=finishedUnixNano,proto3" json:"finished_unix_nano,omitempty"`
+	Error            string                 `protobuf:"bytes,8,opt,name=error,proto3" json:"error,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StatusResponse) Reset() {
@@ -462,6 +538,34 @@ func (x *StatusResponse) GetElapsedNanos() int64 {
 	return 0
 }
 
+func (x *StatusResponse) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+func (x *StatusResponse) GetStdout() string {
+	if x != nil {
+		return x.Stdout
+	}
+	return ""
+}
+
+func (x *StatusResponse) GetStderr() string {
+	if x != nil {
+		return x.Stderr
+	}
+	return ""
+}
+
+func (x *StatusResponse) GetFinishedUnixNano() int64 {
+	if x != nil {
+		return x.FinishedUnixNano
+	}
+	return 0
+}
+
 func (x *StatusResponse) GetError() string {
 	if x != nil {
 		return x.Error
@@ -473,15 +577,20 @@ var File_worker_proto protoreflect.FileDescriptor
 
 const file_worker_proto_rawDesc = "" +
 	"\n" +
-	"\fworker.proto\x12\x0eodyssey.worker\"\x80\x01\n" +
+	"\fworker.proto\x12\x0eodyssey.worker\"\xbb\x02\n" +
 	"\x0ePrepareRequest\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1f\n" +
 	"\vscenario_id\x18\x02 \x01(\tR\n" +
-	"scenarioId\x12\x16\n" +
-	"\x06target\x18\x03 \x01(\tR\x06target\x12\x1e\n" +
-	"\n" +
-	"operations\x18\x04 \x01(\rR\n" +
-	"operations\">\n" +
+	"scenarioId\x12\x1f\n" +
+	"\vtarget_host\x18\x03 \x01(\tR\n" +
+	"targetHost\x12\x1f\n" +
+	"\vtarget_port\x18\x04 \x01(\rR\n" +
+	"targetPort\x12\x1a\n" +
+	"\bdatabase\x18\x05 \x01(\tR\bdatabase\x12\x12\n" +
+	"\x04user\x18\x06 \x01(\tR\x04user\x12\x18\n" +
+	"\aclients\x18\a \x01(\rR\aclients\x12)\n" +
+	"\x10duration_seconds\x18\b \x01(\rR\x0fdurationSeconds\x12:\n" +
+	"\x19progress_interval_seconds\x18\t \x01(\rR\x17progressIntervalSeconds\">\n" +
 	"\x0fPrepareResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\"%\n" +
@@ -492,18 +601,27 @@ const file_worker_proto_rawDesc = "" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12*\n" +
 	"\x11started_unix_nano\x18\x03 \x01(\x03R\x0fstartedUnixNano\"$\n" +
 	"\vStopRequest\x12\x15\n" +
-	"\x06run_id\x18\x01 \x01(\tR\x05runId\"`\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\xf1\x01\n" +
 	"\fStopResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12#\n" +
-	"\relapsed_nanos\x18\x03 \x01(\x03R\felapsedNanos\"&\n" +
+	"\relapsed_nanos\x18\x03 \x01(\x03R\felapsedNanos\x12\x1b\n" +
+	"\texit_code\x18\x04 \x01(\x05R\bexitCode\x12\x16\n" +
+	"\x06stdout\x18\x05 \x01(\tR\x06stdout\x12\x16\n" +
+	"\x06stderr\x18\x06 \x01(\tR\x06stderr\x12,\n" +
+	"\x12finished_unix_nano\x18\a \x01(\x03R\x10finishedUnixNano\x12\x14\n" +
+	"\x05error\x18\b \x01(\tR\x05error\"&\n" +
 	"\rStatusRequest\x12\x15\n" +
-	"\x06run_id\x18\x01 \x01(\tR\x05runId\"x\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\"\xf3\x01\n" +
 	"\x0eStatusResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\x12#\n" +
-	"\relapsed_nanos\x18\x03 \x01(\x03R\felapsedNanos\x12\x14\n" +
-	"\x05error\x18\x04 \x01(\tR\x05error2\xad\x02\n" +
+	"\relapsed_nanos\x18\x03 \x01(\x03R\felapsedNanos\x12\x1b\n" +
+	"\texit_code\x18\x04 \x01(\x05R\bexitCode\x12\x16\n" +
+	"\x06stdout\x18\x05 \x01(\tR\x06stdout\x12\x16\n" +
+	"\x06stderr\x18\x06 \x01(\tR\x06stderr\x12,\n" +
+	"\x12finished_unix_nano\x18\a \x01(\x03R\x10finishedUnixNano\x12\x14\n" +
+	"\x05error\x18\b \x01(\tR\x05error2\xad\x02\n" +
 	"\rLoadGenerator\x12J\n" +
 	"\aPrepare\x12\x1e.odyssey.worker.PrepareRequest\x1a\x1f.odyssey.worker.PrepareResponse\x12D\n" +
 	"\x05Start\x12\x1c.odyssey.worker.StartRequest\x1a\x1d.odyssey.worker.StartResponse\x12A\n" +
