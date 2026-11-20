@@ -22,18 +22,18 @@ const (
 )
 
 type PrepareRequest struct {
-	state                   protoimpl.MessageState `protogen:"open.v1"`
-	RunId                   string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
-	ScenarioId              string                 `protobuf:"bytes,2,opt,name=scenario_id,json=scenarioId,proto3" json:"scenario_id,omitempty"`
-	TargetHost              string                 `protobuf:"bytes,3,opt,name=target_host,json=targetHost,proto3" json:"target_host,omitempty"`
-	TargetPort              uint32                 `protobuf:"varint,4,opt,name=target_port,json=targetPort,proto3" json:"target_port,omitempty"`
-	Database                string                 `protobuf:"bytes,5,opt,name=database,proto3" json:"database,omitempty"`
-	User                    string                 `protobuf:"bytes,6,opt,name=user,proto3" json:"user,omitempty"`
-	Clients                 uint32                 `protobuf:"varint,7,opt,name=clients,proto3" json:"clients,omitempty"`
-	DurationSeconds         uint32                 `protobuf:"varint,8,opt,name=duration_seconds,json=durationSeconds,proto3" json:"duration_seconds,omitempty"`
-	ProgressIntervalSeconds uint32                 `protobuf:"varint,9,opt,name=progress_interval_seconds,json=progressIntervalSeconds,proto3" json:"progress_interval_seconds,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
+	Scenario      string                 `protobuf:"bytes,2,opt,name=scenario,proto3" json:"scenario,omitempty"`
+	Host          string                 `protobuf:"bytes,3,opt,name=host,proto3" json:"host,omitempty"`
+	Port          uint32                 `protobuf:"varint,4,opt,name=port,proto3" json:"port,omitempty"`
+	Db            string                 `protobuf:"bytes,5,opt,name=db,proto3" json:"db,omitempty"`
+	User          string                 `protobuf:"bytes,6,opt,name=user,proto3" json:"user,omitempty"`
+	Clients       uint32                 `protobuf:"varint,7,opt,name=clients,proto3" json:"clients,omitempty"`
+	Duration      uint32                 `protobuf:"varint,8,opt,name=duration,proto3" json:"duration,omitempty"`
+	Progress      uint32                 `protobuf:"varint,9,opt,name=progress,proto3" json:"progress,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PrepareRequest) Reset() {
@@ -73,30 +73,30 @@ func (x *PrepareRequest) GetRunId() string {
 	return ""
 }
 
-func (x *PrepareRequest) GetScenarioId() string {
+func (x *PrepareRequest) GetScenario() string {
 	if x != nil {
-		return x.ScenarioId
+		return x.Scenario
 	}
 	return ""
 }
 
-func (x *PrepareRequest) GetTargetHost() string {
+func (x *PrepareRequest) GetHost() string {
 	if x != nil {
-		return x.TargetHost
+		return x.Host
 	}
 	return ""
 }
 
-func (x *PrepareRequest) GetTargetPort() uint32 {
+func (x *PrepareRequest) GetPort() uint32 {
 	if x != nil {
-		return x.TargetPort
+		return x.Port
 	}
 	return 0
 }
 
-func (x *PrepareRequest) GetDatabase() string {
+func (x *PrepareRequest) GetDb() string {
 	if x != nil {
-		return x.Database
+		return x.Db
 	}
 	return ""
 }
@@ -115,16 +115,16 @@ func (x *PrepareRequest) GetClients() uint32 {
 	return 0
 }
 
-func (x *PrepareRequest) GetDurationSeconds() uint32 {
+func (x *PrepareRequest) GetDuration() uint32 {
 	if x != nil {
-		return x.DurationSeconds
+		return x.Duration
 	}
 	return 0
 }
 
-func (x *PrepareRequest) GetProgressIntervalSeconds() uint32 {
+func (x *PrepareRequest) GetProgress() uint32 {
 	if x != nil {
-		return x.ProgressIntervalSeconds
+		return x.Progress
 	}
 	return 0
 }
@@ -577,20 +577,17 @@ var File_worker_proto protoreflect.FileDescriptor
 
 const file_worker_proto_rawDesc = "" +
 	"\n" +
-	"\fworker.proto\x12\x0eodyssey.worker\"\xbb\x02\n" +
+	"\fworker.proto\x12\x0eodyssey.worker\"\xe1\x01\n" +
 	"\x0ePrepareRequest\x12\x15\n" +
-	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1f\n" +
-	"\vscenario_id\x18\x02 \x01(\tR\n" +
-	"scenarioId\x12\x1f\n" +
-	"\vtarget_host\x18\x03 \x01(\tR\n" +
-	"targetHost\x12\x1f\n" +
-	"\vtarget_port\x18\x04 \x01(\rR\n" +
-	"targetPort\x12\x1a\n" +
-	"\bdatabase\x18\x05 \x01(\tR\bdatabase\x12\x12\n" +
+	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1a\n" +
+	"\bscenario\x18\x02 \x01(\tR\bscenario\x12\x12\n" +
+	"\x04host\x18\x03 \x01(\tR\x04host\x12\x12\n" +
+	"\x04port\x18\x04 \x01(\rR\x04port\x12\x0e\n" +
+	"\x02db\x18\x05 \x01(\tR\x02db\x12\x12\n" +
 	"\x04user\x18\x06 \x01(\tR\x04user\x12\x18\n" +
-	"\aclients\x18\a \x01(\rR\aclients\x12)\n" +
-	"\x10duration_seconds\x18\b \x01(\rR\x0fdurationSeconds\x12:\n" +
-	"\x19progress_interval_seconds\x18\t \x01(\rR\x17progressIntervalSeconds\">\n" +
+	"\aclients\x18\a \x01(\rR\aclients\x12\x1a\n" +
+	"\bduration\x18\b \x01(\rR\bduration\x12\x1a\n" +
+	"\bprogress\x18\t \x01(\rR\bprogress\">\n" +
 	"\x0fPrepareResponse\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x14\n" +
 	"\x05state\x18\x02 \x01(\tR\x05state\"%\n" +

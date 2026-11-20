@@ -22,14 +22,14 @@ const (
 )
 
 type Workload struct {
-	Scenario                string
-	TargetHost              string
-	TargetPort              uint32
-	Database                string
-	User                    string
-	Clients                 uint32
-	DurationSeconds         uint32
-	ProgressIntervalSeconds uint32
+	Scenario string
+	Host     string
+	Port     uint32
+	DB       string
+	User     string
+	Clients  uint32
+	Duration uint32
+	Progress uint32
 }
 
 type ExecutionResult struct {
@@ -79,14 +79,14 @@ func (generator *Generator) Prepare(_ context.Context, request *workerapi.Prepar
 
 	generator.runID = request.RunId
 	generator.workload = Workload{
-		Scenario:                request.ScenarioId,
-		TargetHost:              request.TargetHost,
-		TargetPort:              request.TargetPort,
-		Database:                request.Database,
-		User:                    request.User,
-		Clients:                 request.Clients,
-		DurationSeconds:         request.DurationSeconds,
-		ProgressIntervalSeconds: request.ProgressIntervalSeconds,
+		Scenario: request.Scenario,
+		Host:     request.Host,
+		Port:     request.Port,
+		DB:       request.Db,
+		User:     request.User,
+		Clients:  request.Clients,
+		Duration: request.Duration,
+		Progress: request.Progress,
 	}
 	generator.result = ExecutionResult{ExitCode: -1}
 	generator.started = time.Time{}
@@ -242,17 +242,17 @@ func validateRequest(request *workerapi.PrepareRequest) error {
 	if err := validateRunID(request.RunId); err != nil {
 		return err
 	}
-	if request.ScenarioId != "pgbench" {
-		return fmt.Errorf("unsupported scenario %q", request.ScenarioId)
+	if request.Scenario != "pgbench" {
+		return fmt.Errorf("unsupported scenario %q", request.Scenario)
 	}
-	if request.TargetHost == "" {
-		return fmt.Errorf("target_host is required")
+	if request.Host == "" {
+		return fmt.Errorf("host is required")
 	}
-	if request.TargetPort == 0 || request.TargetPort > 65535 {
-		return fmt.Errorf("target_port must be between 1 and 65535")
+	if request.Port == 0 || request.Port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
 	}
-	if request.Database == "" {
-		return fmt.Errorf("database is required")
+	if request.Db == "" {
+		return fmt.Errorf("db is required")
 	}
 	if request.User == "" {
 		return fmt.Errorf("user is required")
@@ -260,11 +260,11 @@ func validateRequest(request *workerapi.PrepareRequest) error {
 	if request.Clients == 0 || request.Clients > 10000 {
 		return fmt.Errorf("clients must be between 1 and 10000")
 	}
-	if request.DurationSeconds == 0 || request.DurationSeconds > 86400 {
-		return fmt.Errorf("duration_seconds must be between 1 and 86400")
+	if request.Duration == 0 || request.Duration > 86400 {
+		return fmt.Errorf("duration must be between 1 and 86400")
 	}
-	if request.ProgressIntervalSeconds == 0 || request.ProgressIntervalSeconds > request.DurationSeconds {
-		return fmt.Errorf("progress_interval_seconds must be between 1 and duration_seconds")
+	if request.Progress == 0 || request.Progress > request.Duration {
+		return fmt.Errorf("progress must be between 1 and duration")
 	}
 	return nil
 }
@@ -278,13 +278,13 @@ func validateRunID(runID string) error {
 
 func runPgbench(ctx context.Context, workload Workload) ExecutionResult {
 	args := []string{
-		"--progress=" + strconv.FormatUint(uint64(workload.ProgressIntervalSeconds), 10),
+		"--progress=" + strconv.FormatUint(uint64(workload.Progress), 10),
 		"--client=" + strconv.FormatUint(uint64(workload.Clients), 10),
-		"--time=" + strconv.FormatUint(uint64(workload.DurationSeconds), 10),
-		"--host=" + workload.TargetHost,
-		"--port=" + strconv.FormatUint(uint64(workload.TargetPort), 10),
+		"--time=" + strconv.FormatUint(uint64(workload.Duration), 10),
+		"--host=" + workload.Host,
+		"--port=" + strconv.FormatUint(uint64(workload.Port), 10),
 		"--username=" + workload.User,
-		workload.Database,
+		workload.DB,
 	}
 
 	command := exec.CommandContext(ctx, "pgbench", args...)

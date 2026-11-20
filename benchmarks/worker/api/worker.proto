@@ -13,14 +13,14 @@ service LoadGenerator {
 
 message PrepareRequest {
   string run_id = 1;
-  string scenario_id = 2;
-  string target_host = 3;
-  uint32 target_port = 4;
-  string database = 5;
+  string scenario = 2;
+  string host = 3;
+  uint32 port = 4;
+  string db = 5;
   string user = 6;
   uint32 clients = 7;
-  uint32 duration_seconds = 8;
-  uint32 progress_interval_seconds = 9;
+  uint32 duration = 8;
+  uint32 progress = 9;
 }
 
 message PrepareResponse {
