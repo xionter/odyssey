@@ -83,7 +83,7 @@ func TestGeneratorStopsRunningWorkload(t *testing.T) {
 
 func TestValidateRequest(t *testing.T) {
 	request := validPrepareRequest()
-	request.TargetPort = 0
+	request.Port = 0
 	if err := validateRequest(request); err == nil {
 		t.Fatal("expected invalid port error")
 	}
@@ -91,15 +91,15 @@ func TestValidateRequest(t *testing.T) {
 
 func validPrepareRequest() *workerapi.PrepareRequest {
 	return &workerapi.PrepareRequest{
-		RunId:                   "run-1",
-		ScenarioId:              "pgbench",
-		TargetHost:              "127.0.0.1",
-		TargetPort:              6432,
-		Database:                "benchmarks",
-		User:                    "benchmarks",
-		Clients:                 1,
-		DurationSeconds:         1,
-		ProgressIntervalSeconds: 1,
+		RunId:    "run-1",
+		Scenario: "pgbench",
+		Host:     "127.0.0.1",
+		Port:     6432,
+		Db:       "benchmarks",
+		User:     "benchmarks",
+		Clients:  1,
+		Duration: 1,
+		Progress: 1,
 	}
 }
 
