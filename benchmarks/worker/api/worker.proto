@@ -1,0 +1,69 @@
+syntax = "proto3";
+
+package odyssey.worker;
+
+option go_package = "github.com/yandex/odyssey/benchmarks/worker/api;workerapi";
+
+service LoadGenerator {
+  rpc Prepare(PrepareRequest) returns (PrepareResponse);
+  rpc Start(StartRequest) returns (StartResponse);
+  rpc Stop(StopRequest) returns (StopResponse);
+  rpc Status(StatusRequest) returns (StatusResponse);
+}
+
+message PrepareRequest {
+  string run_id = 1;
+  string scenario = 2;
+  string host = 3;
+  uint32 port = 4;
+  string db = 5;
+  string user = 6;
+  uint32 clients = 7;
+  uint32 duration = 8;
+  uint32 progress = 9;
+}
+
+message PrepareResponse {
+  string run_id = 1;
+  string state = 2;
+}
+
+message StartRequest {
+  string run_id = 1;
+}
+
+message StartResponse {
+  string run_id = 1;
+  string state = 2;
+  int64 started_unix_nano = 3;
+}
+
+message StopRequest {
+  string run_id = 1;
+}
+
+message StopResponse {
+  string run_id = 1;
+  string state = 2;
+  int64 elapsed_nanos = 3;
+  int32 exit_code = 4;
+  string stdout = 5;
+  string stderr = 6;
+  int64 finished_unix_nano = 7;
+  string error = 8;
+}
+
+message StatusRequest {
+  string run_id = 1;
+}
+
+message StatusResponse {
+  string run_id = 1;
+  string state = 2;
+  int64 elapsed_nanos = 3;
+  int32 exit_code = 4;
+  string stdout = 5;
+  string stderr = 6;
+  int64 finished_unix_nano = 7;
+  string error = 8;
+}

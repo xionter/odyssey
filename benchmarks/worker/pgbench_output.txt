@@ -1,0 +1,74 @@
+pgbench (20devel)
+progress: 1.0 s, 84034.0 tps, lat 0.040 ms stddev 0.011, 0 failed
+progress: 2.0 s, 77970.9 tps, lat 0.044 ms stddev 0.034, 0 failed
+progress: 3.0 s, 87384.3 tps, lat 0.039 ms stddev 0.014, 0 failed
+progress: 4.0 s, 87161.5 tps, lat 0.039 ms stddev 0.010, 0 failed
+progress: 5.0 s, 81915.6 tps, lat 0.042 ms stddev 0.020, 0 failed
+progress: 6.0 s, 81786.7 tps, lat 0.042 ms stddev 0.022, 0 failed
+progress: 7.0 s, 74173.7 tps, lat 0.047 ms stddev 0.069, 0 failed
+progress: 8.0 s, 76470.8 tps, lat 0.046 ms stddev 0.042, 0 failed
+progress: 9.0 s, 85939.6 tps, lat 0.040 ms stddev 0.027, 0 failed
+progress: 10.0 s, 86512.8 tps, lat 0.040 ms stddev 0.021, 0 failed
+progress: 11.0 s, 87943.2 tps, lat 0.039 ms stddev 0.012, 0 failed
+progress: 12.0 s, 83516.5 tps, lat 0.041 ms stddev 0.022, 0 failed
+progress: 13.0 s, 72310.4 tps, lat 0.048 ms stddev 0.065, 0 failed
+progress: 14.0 s, 87595.6 tps, lat 0.039 ms stddev 0.014, 0 failed
+progress: 15.0 s, 88050.4 tps, lat 0.039 ms stddev 0.013, 0 failed
+progress: 16.0 s, 87275.8 tps, lat 0.039 ms stddev 0.017, 0 failed
+progress: 17.0 s, 87069.0 tps, lat 0.039 ms stddev 0.022, 0 failed
+progress: 18.0 s, 86449.0 tps, lat 0.040 ms stddev 0.019, 0 failed
+progress: 19.0 s, 84429.3 tps, lat 0.041 ms stddev 0.027, 0 failed
+progress: 20.0 s, 89260.6 tps, lat 0.038 ms stddev 0.011, 0 failed
+progress: 21.0 s, 88496.4 tps, lat 0.039 ms stddev 0.017, 0 failed
+progress: 22.0 s, 73618.6 tps, lat 0.047 ms stddev 0.064, 0 failed
+progress: 23.0 s, 80481.8 tps, lat 0.043 ms stddev 0.067, 0 failed
+progress: 24.0 s, 79307.2 tps, lat 0.044 ms stddev 0.035, 0 failed
+progress: 25.0 s, 84587.3 tps, lat 0.041 ms stddev 0.016, 0 failed
+progress: 26.0 s, 86267.0 tps, lat 0.040 ms stddev 0.018, 0 failed
+progress: 27.0 s, 84103.7 tps, lat 0.041 ms stddev 0.023, 0 failed
+progress: 28.0 s, 84679.4 tps, lat 0.041 ms stddev 0.022, 0 failed
+progress: 29.0 s, 84754.9 tps, lat 0.041 ms stddev 0.018, 0 failed
+progress: 30.0 s, 79682.3 tps, lat 0.044 ms stddev 0.028, 0 failed
+progress: 31.0 s, 84383.7 tps, lat 0.041 ms stddev 0.019, 0 failed
+progress: 32.0 s, 84648.0 tps, lat 0.041 ms stddev 0.022, 0 failed
+progress: 33.0 s, 81315.9 tps, lat 0.042 ms stddev 0.052, 0 failed
+progress: 34.0 s, 84482.9 tps, lat 0.040 ms stddev 0.021, 0 failed
+progress: 35.0 s, 82333.3 tps, lat 0.042 ms stddev 0.023, 0 failed
+progress: 36.0 s, 83930.7 tps, lat 0.041 ms stddev 0.017, 0 failed
+progress: 37.0 s, 87270.2 tps, lat 0.039 ms stddev 0.014, 0 failed
+progress: 38.0 s, 84060.9 tps, lat 0.041 ms stddev 0.024, 0 failed
+progress: 39.0 s, 84742.3 tps, lat 0.041 ms stddev 0.021, 0 failed
+progress: 40.0 s, 81652.9 tps, lat 0.042 ms stddev 0.031, 0 failed
+progress: 41.0 s, 76784.8 tps, lat 0.045 ms stddev 0.067, 0 failed
+progress: 42.0 s, 86978.5 tps, lat 0.039 ms stddev 0.013, 0 failed
+progress: 43.0 s, 83743.5 tps, lat 0.041 ms stddev 0.063, 0 failed
+progress: 44.0 s, 84250.7 tps, lat 0.041 ms stddev 0.021, 0 failed
+progress: 45.0 s, 76417.2 tps, lat 0.046 ms stddev 0.029, 0 failed
+progress: 46.0 s, 84666.0 tps, lat 0.041 ms stddev 0.034, 0 failed
+progress: 47.0 s, 70133.9 tps, lat 0.050 ms stddev 0.054, 0 failed
+progress: 48.0 s, 81323.2 tps, lat 0.042 ms stddev 0.024, 0 failed
+progress: 49.0 s, 85090.3 tps, lat 0.040 ms stddev 0.016, 0 failed
+progress: 50.0 s, 85598.5 tps, lat 0.040 ms stddev 0.015, 0 failed
+progress: 51.0 s, 82282.2 tps, lat 0.042 ms stddev 0.021, 0 failed
+progress: 52.0 s, 76001.4 tps, lat 0.046 ms stddev 0.037, 0 failed
+progress: 53.0 s, 85034.9 tps, lat 0.041 ms stddev 0.036, 0 failed
+progress: 54.0 s, 88756.9 tps, lat 0.039 ms stddev 0.012, 0 failed
+progress: 55.0 s, 86632.0 tps, lat 0.039 ms stddev 0.015, 0 failed
+progress: 56.0 s, 78653.3 tps, lat 0.044 ms stddev 0.018, 0 failed
+progress: 57.0 s, 89925.0 tps, lat 0.038 ms stddev 0.016, 0 failed
+progress: 58.0 s, 83297.8 tps, lat 0.041 ms stddev 0.022, 0 failed
+progress: 59.0 s, 89363.1 tps, lat 0.038 ms stddev 0.010, 0 failed
+progress: 60.0 s, 89875.8 tps, lat 0.038 ms stddev 0.010, 0 failed
+transaction type: f.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 1
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 5006862
+number of failed transactions: 0 (0.000%)
+latency average = 0.041 ms
+latency stddev = 0.030 ms
+initial connection time = 8.199 ms
+tps = 83458.837582 (without initial connection time)
