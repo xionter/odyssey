@@ -13,6 +13,8 @@ type BenchmarkRun struct {
 	Status         string
 	PgbenchVersion *string
 	PgbenchArgs    map[string]any
+	Config         map[string]any
+	Environment    map[string]any
 	StartedAt      *time.Time
 	FinishedAt     *time.Time
 	CreatedAt      time.Time
@@ -22,8 +24,9 @@ type BenchmarkRun struct {
 type BenchmarkSample struct {
 	IntervalStart time.Time
 
-	IntervalSeconds float64
-	NumTransactions int64
+	IntervalSeconds    float64
+	NumTransactions    int64
+	FailedTransactions int64
 
 	LatencySumUS   int64
 	LatencySumSqUS int64

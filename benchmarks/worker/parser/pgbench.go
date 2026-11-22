@@ -50,7 +50,7 @@ func ParsePgbenchOutput(r io.Reader, runStart time.Time) (PgbenchOutput, error) 
 		}
 		if matches := totalTransactionsLine.FindStringSubmatch(line); matches != nil {
 			value, err := strconv.ParseInt(matches[1], 10, 64)
-			if err != nil {
+			if err != nil || value < 0 {
 				return PgbenchOutput{}, fmt.Errorf("parse pgbench output: line %d: invalid total transaction count %q", lineNumber, matches[1])
 			}
 			totalTransactions = &value
@@ -80,11 +80,8 @@ func ParsePgbenchOutput(r io.Reader, runStart time.Time) (PgbenchOutput, error) 
 			return PgbenchOutput{}, fmt.Errorf("parse pgbench output: line %d: invalid latency stddev %q", lineNumber, matches[4])
 		}
 		failed, err := strconv.ParseInt(matches[5], 10, 64)
-		if err != nil {
+		if err != nil || failed < 0 {
 			return PgbenchOutput{}, fmt.Errorf("parse pgbench output: line %d: invalid failed transaction count %q", lineNumber, matches[5])
-		}
-		if failed != 0 {
-			return PgbenchOutput{}, fmt.Errorf("parse pgbench output: line %d: %d failed transactions are not supported by the sample model", lineNumber, failed)
 		}
 		if len(result.Samples) > 0 && elapsed <= previousElapsed {
 			return PgbenchOutput{}, fmt.Errorf("parse pgbench output: line %d: elapsed time is not increasing", lineNumber)
@@ -113,16 +110,17 @@ func ParsePgbenchOutput(r io.Reader, runStart time.Time) (PgbenchOutput, error) 
 		latencySumSq := int64(math.Round(latencySumSqFloat))
 		intervalStart := runStart.Add(time.Duration((elapsed - actualInterval) * float64(time.Second)))
 		result.Samples = append(result.Samples, models.BenchmarkSample{
-			IntervalStart:   intervalStart,
-			IntervalSeconds: actualInterval,
-			NumTransactions: transactions,
-			LatencySumUS:    latencySum,
-			LatencySumSqUS:  latencySumSq,
-			LatencyMinUS:    nil,
-			LatencyMaxUS:    nil,
-			TPS:             tps,
-			LatencyAvgMS:    float64Pointer(averageMS),
-			LatencyStddevMS: float64Pointer(stddevMS),
+			IntervalStart:      intervalStart,
+			IntervalSeconds:    actualInterval,
+			NumTransactions:    transactions,
+			FailedTransactions: failed,
+			LatencySumUS:       latencySum,
+			LatencySumSqUS:     latencySumSq,
+			LatencyMinUS:       nil,
+			LatencyMaxUS:       nil,
+			TPS:                tps,
+			LatencyAvgMS:       float64Pointer(averageMS),
+			LatencyStddevMS:    float64Pointer(stddevMS),
 		})
 		previousElapsed = elapsed
 	}

@@ -20,6 +20,8 @@ var ErrRunNotFound = errors.New("benchmark run not found")
 type Repository interface {
 	CreateRun(ctx context.Context, run models.BenchmarkRun) error
 	SaveSamples(ctx context.Context, runID uuid.UUID, samples []models.BenchmarkSample) error
+	SetStatus(ctx context.Context, runID uuid.UUID, status string, finishedAt *time.Time, message *string) error
+	SetPgbenchVersion(ctx context.Context, runID uuid.UUID, version string) error
 	CompleteRun(ctx context.Context, runID uuid.UUID, finishedAt time.Time) error
 	FailRun(ctx context.Context, runID uuid.UUID, finishedAt time.Time, message string) error
 }
@@ -67,6 +69,18 @@ func (r *PostgresRepository) CreateRun(ctx context.Context, run models.Benchmark
 	if err != nil {
 		return fmt.Errorf("marshal pgbench arguments: %w", err)
 	}
+	config := run.Config
+	if config == nil {
+		config = args
+	}
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshal benchmark config: %w", err)
+	}
+	environmentJSON, err := json.Marshal(run.Environment)
+	if err != nil {
+		return fmt.Errorf("marshal benchmark environment: %w", err)
+	}
 	var createdAt any
 	if !run.CreatedAt.IsZero() {
 		createdAt = run.CreatedAt
@@ -78,6 +92,8 @@ func (r *PostgresRepository) CreateRun(ctx context.Context, run models.Benchmark
 		run.Status,
 		run.PgbenchVersion,
 		argsJSON,
+		configJSON,
+		environmentJSON,
 		run.StartedAt,
 		run.FinishedAt,
 		createdAt,
@@ -111,6 +127,7 @@ func (r *PostgresRepository) SaveSamples(ctx context.Context, runID uuid.UUID, s
 	for i, sample := range samples {
 		rows[i] = []any{
 			runID, sample.IntervalStart, sample.IntervalSeconds, sample.NumTransactions,
+			sample.FailedTransactions,
 			sample.LatencySumUS, sample.LatencySumSqUS, sample.LatencyMinUS, sample.LatencyMaxUS,
 			sample.TPS, sample.LatencyAvgMS, sample.LatencyStddevMS,
 		}
@@ -131,17 +148,28 @@ func (r *PostgresRepository) SaveSamples(ctx context.Context, runID uuid.UUID, s
 }
 
 func (r *PostgresRepository) CompleteRun(ctx context.Context, runID uuid.UUID, finishedAt time.Time) error {
-	return r.updateRunStatus(ctx, runID, "succeeded", finishedAt, nil)
+	return r.SetStatus(ctx, runID, "succeeded", &finishedAt, nil)
 }
 
 func (r *PostgresRepository) FailRun(ctx context.Context, runID uuid.UUID, finishedAt time.Time, message string) error {
-	return r.updateRunStatus(ctx, runID, "failed", finishedAt, &message)
+	return r.SetStatus(ctx, runID, "failed", &finishedAt, &message)
 }
 
-func (r *PostgresRepository) updateRunStatus(ctx context.Context, runID uuid.UUID, status string, finishedAt time.Time, message *string) error {
+func (r *PostgresRepository) SetStatus(ctx context.Context, runID uuid.UUID, status string, finishedAt *time.Time, message *string) error {
 	result, err := r.pool.Exec(ctx, updateRunStatusQuery, runID, status, finishedAt, message)
 	if err != nil {
 		return fmt.Errorf("update benchmark run %s status: %w", runID, err)
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("%w: %s", ErrRunNotFound, runID)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) SetPgbenchVersion(ctx context.Context, runID uuid.UUID, version string) error {
+	result, err := r.pool.Exec(ctx, updateRunMetadataQuery, runID, version)
+	if err != nil {
+		return fmt.Errorf("update benchmark run %s pgbench version: %w", runID, err)
 	}
 	if result.RowsAffected() != 1 {
 		return fmt.Errorf("%w: %s", ErrRunNotFound, runID)

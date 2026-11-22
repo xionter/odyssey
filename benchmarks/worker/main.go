@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -13,17 +12,16 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	workerapi "github.com/yandex/odyssey/benchmarks/worker/api"
+	"github.com/yandex/odyssey/benchmarks/worker/collector"
 	"github.com/yandex/odyssey/benchmarks/worker/internal/client"
 	"github.com/yandex/odyssey/benchmarks/worker/models"
-	"github.com/yandex/odyssey/benchmarks/worker/parser"
 	"github.com/yandex/odyssey/benchmarks/worker/storage"
 )
-
-const defaultDatabaseURL = "postgres://benchmarks:benchmarks@127.0.0.1:5433/benchmarks?sslmode=disable"
 
 func main() {
 	inputPath := flag.String("input", "", "pgbench output file for local file mode")
 	databaseURL := flag.String("database-url", os.Getenv("RESULTS_DATABASE_URL"), "results database URL")
+	spoolDir := flag.String("spool-dir", "", "directory for result artifacts kept until upload succeeds")
 	scenario := flag.String("scenario", "pgbench", "benchmark scenario name")
 	commitHash := flag.String("commit-hash", "", "tested commit hash")
 	agentAddr := flag.String("agent", "", "load generator gRPC address")
@@ -37,8 +35,8 @@ func main() {
 	poll := flag.Duration("poll", 200*time.Millisecond, "agent status polling interval")
 	flag.Parse()
 
-	if *databaseURL == "" {
-		*databaseURL = defaultDatabaseURL
+	if *spoolDir == "" {
+		*spoolDir = os.Getenv("RESULTS_SPOOL_DIR")
 	}
 	if *agentAddr == "" && *inputPath == "" {
 		fatal(fmt.Errorf("either -agent-address or -input is required"))
@@ -53,6 +51,10 @@ func main() {
 		fatal(err)
 	}
 	defer repository.Close()
+	collector := &collector.Collector{Repository: repository, SpoolDir: *spoolDir}
+	if err := collector.Replay(ctx); err != nil {
+		fatal(fmt.Errorf("replay stored results: %w", err))
+	}
 
 	runID := uuid.New()
 	startedAt := time.Now().UTC()
@@ -70,14 +72,24 @@ func main() {
 			"port":     *port,
 			"db":       *db,
 		},
+		Config: map[string]any{
+			"clients":  *clients,
+			"duration": *duration,
+			"progress": *progress,
+		},
+		Environment: map[string]any{
+			"odyssey_host":   *host,
+			"odyssey_port":   *port,
+			"load_generator": *agentAddr,
+		},
 	}
 	if err := repository.CreateRun(ctx, run); err != nil {
 		fatal(err)
 	}
 
-	var parsed parser.PgbenchOutput
+	var rawOutput []byte
 	if *agentAddr != "" {
-		parsed, err = runRemote(ctx, *agentAddr, client.RunRequest{
+		result, remoteErr := runRemote(ctx, *agentAddr, client.RunRequest{
 			RunID:        runID.String(),
 			Scenario:     *scenario,
 			Host:         *host,
@@ -88,47 +100,75 @@ func main() {
 			Duration:     uint32(*duration),
 			Progress:     uint32(*progress),
 			PollInterval: *poll,
-		}, startedAt)
+		})
+		err = remoteErr
+		if err == nil {
+			rawOutput = combinePgbenchOutput(result)
+		}
 	} else {
-		parsed, err = parser.ParsePgbenchOutputFile(*inputPath, startedAt)
+		rawOutput, err = os.ReadFile(*inputPath)
+		if err != nil {
+			err = fmt.Errorf("collect result file %q: %w", *inputPath, err)
+		}
 	}
 	if err != nil {
 		failRun(repository, runID, err)
 		fatal(err)
 	}
-
-	run.PgbenchVersion = stringPointer(parsed.Version)
-	if err := repository.SaveSamples(ctx, runID, parsed.Samples); err != nil {
-		failRun(repository, runID, err)
+	if err := collector.Collect(ctx, run, rawOutput, time.Now().UTC()); err != nil {
 		fatal(err)
 	}
-	if err := repository.CompleteRun(ctx, runID, time.Now().UTC()); err != nil {
-		fatal(err)
-	}
-	fmt.Printf("saved benchmark run %s: %d samples\n", runID, len(parsed.Samples))
+	fmt.Printf("saved benchmark run %s\n", runID)
 }
 
-func runRemote(ctx context.Context, address string, request client.RunRequest, startedAt time.Time) (parser.PgbenchOutput, error) {
+// pgbench writes progress reports to stderr on some versions and the final
+// report to stdout. The parser accepts both kinds of lines, so preserve both
+// streams before handing the result to the collector.
+func combinePgbenchOutput(result client.RunResult) []byte {
+	output := []byte(result.Stdout)
+	if result.Stderr != "" {
+		if len(output) > 0 && output[len(output)-1] != '\n' {
+			output = append(output, '\n')
+		}
+		output = append(output, result.Stderr...)
+	}
+	return output
+}
+
+func runRemote(ctx context.Context, address string, request client.RunRequest) (client.RunResult, error) {
 	connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		return parser.PgbenchOutput{}, fmt.Errorf("connect to load generator %q: %w", address, err)
+		return client.RunResult{}, fmt.Errorf("connect to load generator %q: %w", address, err)
 	}
 	defer connection.Close()
 
 	result, err := client.Run(ctx, workerapi.NewLoadGeneratorClient(connection), request)
 	if err != nil {
-		return parser.PgbenchOutput{}, err
+		return client.RunResult{}, fmt.Errorf("collect remote result: %w", err)
 	}
 	if result.State != "finished" {
-		return parser.PgbenchOutput{}, fmt.Errorf("load generator finished with state %q: %s", result.State, result.Error)
+		return client.RunResult{}, fmt.Errorf("execution: load generator finished with state %q: %s", result.State, result.Error)
 	}
 	if result.ExitCode != 0 {
-		return parser.PgbenchOutput{}, fmt.Errorf("pgbench exited with code %d: %s", result.ExitCode, result.Error)
+		return client.RunResult{}, fmt.Errorf("execution: pgbench exited with code %d: %s", result.ExitCode, executionDetails(result))
 	}
 	if result.Error != "" {
-		return parser.PgbenchOutput{}, fmt.Errorf("pgbench failed: %s", result.Error)
+		return client.RunResult{}, fmt.Errorf("execution: pgbench failed: %s", executionDetails(result))
 	}
-	return parser.ParsePgbenchOutput(bytes.NewReader([]byte(result.Stdout)), startedAt)
+	return result, nil
+}
+
+func executionDetails(result client.RunResult) string {
+	if result.Error != "" && result.Stderr != "" {
+		return result.Error + ": " + result.Stderr
+	}
+	if result.Error != "" {
+		return result.Error
+	}
+	if result.Stderr != "" {
+		return result.Stderr
+	}
+	return "no diagnostic output"
 }
 
 func failRun(repository *storage.PostgresRepository, runID uuid.UUID, cause error) {
