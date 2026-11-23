@@ -12,8 +12,6 @@ import (
 	"github.com/yandex/odyssey/benchmarks/worker/models"
 )
 
-// Set RESULTS_TEST_DATABASE_URL to an isolated PostgreSQL database to run this
-// integration test. It is intentionally skipped in normal unit-test runs.
 func TestPostgresRepositoryRoundTrip(t *testing.T) {
 	databaseURL := os.Getenv("RESULTS_TEST_DATABASE_URL")
 	if databaseURL == "" {

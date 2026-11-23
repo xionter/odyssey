@@ -1,5 +1,3 @@
-// Package collector connects the load-generator result with the existing
-// pgbench parser and the results repository.
 package collector
 
 import (
@@ -28,8 +26,6 @@ const (
 	StageStorage    Stage = "storage"
 )
 
-// Error keeps failures from running pgbench, obtaining its output, parsing it,
-// and uploading it distinguishable to callers and to the run error_message.
 type Error struct {
 	Stage Stage
 	Err   error
@@ -71,8 +67,6 @@ func (c *Collector) Collect(ctx context.Context, run models.BenchmarkRun, raw []
 	if err != nil {
 		message := (&Error{Stage: StageParsing, Err: err}).Error()
 		if failErr := c.Repository.FailRun(ctx, run.ID, finishedAt, message); failErr == nil {
-			// The terminal failed status is durably recorded. Keeping an invalid
-			// artifact would make every worker restart fail on the same parse error.
 			_ = c.removeArtifact(run.ID)
 		}
 		return &Error{Stage: StageParsing, Err: err}
@@ -97,8 +91,6 @@ func (c *Collector) Collect(ctx context.Context, run models.BenchmarkRun, raw []
 	return nil
 }
 
-// Replay retries artifacts left by a previous worker process. Artifacts are
-// removed only after samples and the terminal status have been committed.
 func (c *Collector) Replay(ctx context.Context) error {
 	if c == nil || c.SpoolDir == "" {
 		return nil
